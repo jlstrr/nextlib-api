@@ -1,5 +1,6 @@
 import mongoose from "mongoose";
 import bcrypt from "bcryptjs";
+import jwt from "jsonwebtoken";
 
 const userSchema = new mongoose.Schema(
   {
@@ -20,7 +21,18 @@ const userSchema = new mongoose.Schema(
       default: "student",
     },
 
+    status: {
+      type: String,
+      enum: ["active", "inactive", "suspended"],
+      default: "active",
+    },
+
     remaining_time: { type: String, default: null }, // in minutes or hours
+    
+    // Reservation tracking fields
+    // approved_reservations_count: { type: Number, default: 0 },
+    // rejected_reservations_count: { type: Number, default: 0 },
+    
     isDeleted: { type: Boolean, default: false },
   },
   { timestamps: true }
@@ -36,6 +48,21 @@ userSchema.pre("save", async function (next) {
 // 🔑 Compare password method
 userSchema.methods.comparePassword = function (candidatePassword) {
   return bcrypt.compare(candidatePassword, this.password);
+};
+
+// 🎫 Generate JWT token
+userSchema.methods.generateToken = function () {
+  return jwt.sign(
+    {
+      userId: this._id,
+      fullName: `${this.firstname}${this.middle_initial ? ' ' + this.middle_initial : ''} ${this.lastname}`,
+      idNumber: this.id_number,
+      userType: this.user_type,
+      status: this.status,
+    },
+    process.env.JWT_SECRET,
+    { expiresIn: "24h" }
+  );
 };
 
 const User = mongoose.model("User", userSchema);

@@ -1,5 +1,6 @@
 import mongoose from "mongoose";
 import bcrypt from "bcryptjs";
+import jwt from "jsonwebtoken";
 
 const adminSchema = new mongoose.Schema(
   {
@@ -64,6 +65,20 @@ adminSchema.pre("save", async function (next) {
 // 🔑 Compare password for login
 adminSchema.methods.comparePassword = async function (candidatePassword) {
   return bcrypt.compare(candidatePassword, this.password);
+};
+
+// 🎫 Generate JWT token
+adminSchema.methods.generateToken = function () {
+  return jwt.sign(
+    {
+      userId: this._id,
+      username: this.username,
+      userType: "admin",
+      isSuperAdmin: this.isSuperAdmin,
+    },
+    process.env.JWT_SECRET,
+    { expiresIn: "24h" }
+  );
 };
 
 const Admin = mongoose.model("Admin", adminSchema);

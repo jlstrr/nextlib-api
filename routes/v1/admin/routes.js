@@ -1,26 +1,8 @@
 import { Router } from "express";
-import jwt from "jsonwebtoken";
 import Admin from "../../../models/Admin.js";
-import { authMiddleware } from "../../../middleware/auth.js";
-import { superAdminMiddleware } from "../../../middleware/superAdmin.js";
+import { adminAuthMiddleware, authMiddleware, requireSuperAdmin } from "../../../middleware/auth.js";
 
 const router = Router();
-
-const JWT_SECRET = process.env.JWT_SECRET || "supersecret";
-const REFRESH_SECRET = process.env.REFRESH_SECRET || "refreshsecret";
-
-let refreshTokens = [];
-
-// === TOKEN UTILS ===
-const generateAccessToken = (adminId) => {
-  return jwt.sign({ id: adminId }, JWT_SECRET, { expiresIn: "15m" });
-};
-
-const generateRefreshToken = (adminId) => {
-  const token = jwt.sign({ id: adminId }, REFRESH_SECRET, { expiresIn: "7d" });
-  refreshTokens.push(token);
-  return token;
-};
 
 // ==========================
 // 🔐 AUTH ROUTES
@@ -66,46 +48,80 @@ router.post("/login", async (req, res) => {
       return res.status(403).json({ message: "Admin account is not active" });
     }
 
-    const accessToken = generateAccessToken(admin._id);
-    const refreshToken = generateRefreshToken(admin._id);
+    // Generate JWT token
+    const token = admin.generateToken();
 
-    res.json({ message: "Login successful", accessToken, refreshToken });
+    // Set JWT token directly as cookie value
+    res.cookie('session', token, {
+      httpOnly: true,
+      secure: process.env.NODE_ENV === 'production',
+      maxAge: 24 * 60 * 60 * 1000 // 24 hours
+    });
+
+    res.json({
+      message: "Login successful",
+      admin: {
+        id: admin._id,
+        username: admin.username,
+        firstname: admin.firstname,
+        lastname: admin.lastname,
+        isSuperAdmin: admin.isSuperAdmin,
+        status: admin.status
+      },
+      token // Optionally return token for client storage
+    });
   } catch (err) {
     res.status(500).json({ error: err.message });
   }
 });
 
 // Profile
-router.get("/profile", authMiddleware, async (req, res) => {
+router.get("/profile", adminAuthMiddleware, async (req, res) => {
   try {
-    const admin = await Admin.findById(req.userId).select("-password");
-    if (!admin) return res.status(404).json({ message: "Admin not found" });
-
-    res.json(admin);
+    // Admin is already loaded by adminAuthMiddleware
+    res.status(200).json({ status: 200, message: "Admin profile retrieved successfully", data: req.user });
   } catch (err) {
     res.status(500).json({ error: err.message });
   }
 });
 
-// Refresh Token
-router.post("/refresh", (req, res) => {
-  const { token } = req.body;
-  if (!token) return res.status(401).json({ message: "Refresh token required" });
-  if (!refreshTokens.includes(token)) return res.status(403).json({ message: "Invalid refresh token" });
+// Logout
+router.post("/logout", adminAuthMiddleware, (req, res) => {
+  const userId = req.userId;
+  const username = req.user.username;
+  const isSuperAdmin = req.isSuperAdmin;
 
-  jwt.verify(token, REFRESH_SECRET, (err, decoded) => {
-    if (err) return res.status(403).json({ message: "Invalid or expired refresh token" });
-
-    const accessToken = generateAccessToken(decoded.id);
-    res.json({ accessToken });
+  // Clear the session cookie
+  res.clearCookie('session');
+  
+  res.json({ 
+    message: "Admin logged out successfully"
   });
 });
 
-// Logout
-router.post("/logout", (req, res) => {
-  const { token } = req.body;
-  refreshTokens = refreshTokens.filter((t) => t !== token);
-  res.json({ message: "Logged out successfully" });
+// --- Check Authentication Status ---
+router.get("/status", (req, res) => {
+  const token = req.cookies.session;
+  if (token) {
+    try {
+      const jwt = require('jsonwebtoken');
+      const decoded = jwt.verify(token, process.env.JWT_SECRET);
+      
+      res.json({
+        authenticated: true,
+        userId: decoded.userId,
+        userType: decoded.userType,
+        username: decoded.username,
+        isSuperAdmin: decoded.isSuperAdmin
+      });
+    } catch (error) {
+      // Token is invalid, clear cookie
+      res.clearCookie('session');
+      res.json({ authenticated: false });
+    }
+  } else {
+    res.json({ authenticated: false });
+  }
 });
 
 // ==========================
@@ -113,28 +129,28 @@ router.post("/logout", (req, res) => {
 // ==========================
 
 // Get All Admins
-router.get("/", authMiddleware, superAdminMiddleware, async (req, res) => {
+router.get("/", requireSuperAdmin, async (req, res) => {
   try {
-    const admins = await Admin.find().select("-password");
-    res.json(admins);
+    const admins = await Admin.find({ isSuperAdmin: false }).select("-password");
+    res.status(200).json({ status: 200, message: "Admins retrieved successfully", data: admins });
   } catch (err) {
     res.status(500).json({ error: err.message });
   }
 });
 
 // Get Admin by ID
-router.get("/:id", authMiddleware, superAdminMiddleware, async (req, res) => {
+router.get("/:id", authMiddleware, async (req, res) => {
   try {
     const admin = await Admin.findById(req.params.id).select("-password");
     if (!admin) return res.status(404).json({ message: "Admin not found" });
-    res.json(admin);
+    res.status(200).json({ status: 200, message: "Admin retrieved successfully", data: admin });
   } catch (err) {
     res.status(500).json({ error: err.message });
   }
 });
 
 // Update Admin
-router.put("/:id", authMiddleware, superAdminMiddleware, async (req, res) => {
+router.put("/:id", requireSuperAdmin, async (req, res) => {
   try {
     const updates = req.body;
     const admin = await Admin.findByIdAndUpdate(req.params.id, updates, { new: true }).select("-password");
@@ -147,7 +163,7 @@ router.put("/:id", authMiddleware, superAdminMiddleware, async (req, res) => {
 });
 
 // Delete (Deactivate) Admin
-router.delete("/:id", authMiddleware, superAdminMiddleware, async (req, res) => {
+router.delete("/:id", requireSuperAdmin, async (req, res) => {
   try {
     const admin = await Admin.findByIdAndUpdate(req.params.id, { status: "inactive" }, { new: true });
     if (!admin) return res.status(404).json({ message: "Admin not found" });

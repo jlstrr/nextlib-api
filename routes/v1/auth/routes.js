@@ -1,31 +1,8 @@
 import { Router } from "express";
-import jwt from "jsonwebtoken";
 import User from "../../../models/User.js";
-import { authMiddleware } from "../../../middleware/auth.js";
+import { authMiddleware, clearSessionCookie } from "../../../middleware/auth.js";
 
 const router = Router();
-
-// Secrets
-const JWT_SECRET = process.env.JWT_SECRET || "supersecret";
-const REFRESH_SECRET = process.env.REFRESH_SECRET || "refreshsecret";
-
-// In-memory store for refresh tokens (👉 better to use Redis/DB in prod)
-let refreshTokens = [];
-
-// Generate Tokens
-const generateAccessToken = (user) => {
-  return jwt.sign(
-    { id: user._id, user_type: user.user_type }, // include role
-    JWT_SECRET,
-    { expiresIn: "15m" }
-  );
-};
-
-const generateRefreshToken = (userId) => {
-  const token = jwt.sign({ id: userId }, REFRESH_SECRET, { expiresIn: "7d" });
-  refreshTokens.push(token);
-  return token;
-};
 
 // --- Register ---
 router.post("/register", async (req, res) => {
@@ -40,6 +17,7 @@ router.post("/register", async (req, res) => {
       user_type,
       password,
       remaining_time,
+      status = "active", // Default to active if not provided
     } = req.body;
 
     const existing = await User.findOne({ id_number });
@@ -59,6 +37,7 @@ router.post("/register", async (req, res) => {
       user_type,
       password,
       remaining_time: user_type === "student" ? remaining_time : undefined,
+      status,
     });
 
     await user.save();
@@ -78,13 +57,37 @@ router.post("/login", async (req, res) => {
       return res.status(401).json({ message: "Invalid credentials" });
     }
 
-    const accessToken = generateAccessToken(user);
-    const refreshToken = generateRefreshToken(user._id);
+    // Check if user account is active
+    if (user.status !== "active") {
+      return res.status(403).json({ message: "User account is not active" });
+    }
+
+    // Generate JWT token
+    const token = user.generateToken();
+
+    // Set JWT token directly as cookie value with proper CORS settings
+    res.cookie('session', token, {
+      httpOnly: true,
+      secure: process.env.NODE_ENV === 'production',
+      maxAge: 24 * 60 * 60 * 1000, // 24 hours
+      sameSite: process.env.NODE_ENV === 'production' ? 'none' : 'lax', // Allow cross-origin in dev
+      domain: process.env.NODE_ENV === 'production' ? process.env.COOKIE_DOMAIN : undefined // No domain restriction in dev
+    });
+
+    const middle = user.middleInitial ?? user.middle_initial ?? '';
+    const fullName = middle ? `${user.firstname} ${middle} ${user.lastname}` : `${user.firstname} ${user.lastname}`;
 
     res.json({
       message: "Login successful",
-      accessToken,
-      refreshToken,
+      user: {
+        id: user._id,
+        id_number: user.id_number,
+        name: fullName,
+        email: user.email,
+        user_type: user.user_type,
+        status: user.status
+      },
+      token // Optionally return token for client storage
     });
   } catch (err) {
     res.status(500).json({ error: err.message });
@@ -94,36 +97,50 @@ router.post("/login", async (req, res) => {
 // --- Profile (Protected) ---
 router.get("/profile", authMiddleware, async (req, res) => {
   try {
-    const user = await User.findById(req.userId).select("-password -__v");
-    if (!user || user.isDeleted)
-      return res.status(404).json({ message: "User not found" });
-
-    res.json(user);
+    // User is already loaded by authMiddleware
+    res.json(req.user);
   } catch (err) {
     res.status(500).json({ error: err.message });
   }
 });
 
-// --- Refresh Token ---
-router.post("/refresh", (req, res) => {
-  const { token } = req.body;
-  if (!token) return res.status(401).json({ message: "Refresh token required" });
-  if (!refreshTokens.includes(token))
-    return res.status(403).json({ message: "Invalid refresh token" });
-
-  jwt.verify(token, REFRESH_SECRET, (err, decoded) => {
-    if (err) return res.status(403).json({ message: "Invalid or expired refresh token" });
-
-    const accessToken = generateAccessToken(decoded.id);
-    res.json({ accessToken });
-  });
+// --- Check Authentication Status ---
+router.get("/status", (req, res) => {
+  const token = req.cookies.session;
+  if (token) {
+    try {
+      // Verify the token without requiring full auth middleware
+      const jwt = require('jsonwebtoken');
+      const decoded = jwt.verify(token, process.env.JWT_SECRET);
+      
+      res.json({
+        authenticated: true,
+        userId: decoded.userId,
+        userType: decoded.userType,
+        idNumber: decoded.idNumber,
+        status: decoded.status
+      });
+    } catch (error) {
+      // Token is invalid, clear cookie with proper options
+      clearSessionCookie(res);
+      res.json({ authenticated: false });
+    }
+  } else {
+    res.json({ authenticated: false });
+  }
 });
 
 // --- Logout ---
-router.post("/logout", (req, res) => {
-  const { token } = req.body;
-  refreshTokens = refreshTokens.filter((t) => t !== token);
-  res.json({ message: "Logged out successfully" });
+router.post("/logout", authMiddleware, (req, res) => {
+  const userId = req.userId;
+  const userType = req.userType;
+
+  // Clear the session cookie with proper options
+  clearSessionCookie(res);
+  
+  res.json({ 
+    message: "User logged out successfully"
+  });
 });
 
 export default router;
