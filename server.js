@@ -31,7 +31,7 @@ app.use(cookieParser());
 
 // CORS configuration
 app.use(cors({
-  origin: process.env.FRONTEND_URL || 'http://localhost:5173', // Allow your frontend origin
+  origin: process.env.FRONTEND_URL || 'https://ireserve-system.vercel.app/', // Allow your frontend origin
   credentials: true, // Allow cookies and credentials
   methods: ['GET', 'POST', 'PUT', 'DELETE', 'OPTIONS', 'PATCH'],
   allowedHeaders: ['Content-Type', 'Authorization', 'X-Requested-With']
