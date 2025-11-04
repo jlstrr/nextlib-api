@@ -1,4 +1,4 @@
-# ireserve-api
+# nextlib-api
 
 A brief description of your project.
 
@@ -13,8 +13,8 @@ A brief description of your project.
 ## Installation
 
 ```bash
-git clone https://github.com/yourusername/ireserve-api.git
-cd ireserve-api
+git clone https://github.com/yourusername/nextlib-api.git
+cd nextlib-api
 npm install
 ```
 
