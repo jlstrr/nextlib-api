@@ -1,7 +1,10 @@
 import { Router } from "express";
+import { nanoid } from "nanoid";
 import Reservation from "../../../models/Reservation.js";
 import User from "../../../models/User.js";
 import Admin from "../../../models/Admin.js";
+import Computer from "../../../models/Computer.js";
+import Laboratory from "../../../models/Laboratory.js";
 import { adminAuthMiddleware, authMiddleware } from "../../../middleware/auth.js";
 
 const router = Router();
@@ -10,32 +13,123 @@ const router = Router();
 // � UTILITY FUNCTIONS
 // ==========================
 
+// Helper function to validate military time format
+const isValidMilitaryTime = (timeString) => {
+  if (typeof timeString !== 'string') return false;
+  return /^([01]?[0-9]|2[0-3]):[0-5][0-9]$/.test(timeString);
+};
+
+// Helper function to convert military time to minutes since midnight
+const timeToMinutes = (timeString) => {
+  const [hours, minutes] = timeString.split(':').map(Number);
+  return hours * 60 + minutes;
+};
+
+// Helper function to convert minutes since midnight to military time
+const minutesToTime = (minutes) => {
+  const hours = Math.floor(minutes / 60);
+  const mins = minutes % 60;
+  return `${hours.toString().padStart(2, '0')}:${mins.toString().padStart(2, '0')}`;
+};
+
+// Helper function to combine date and military time into a full DateTime
+const combineDateAndTime = (date, timeString) => {
+  const [hours, minutes] = timeString.split(':').map(Number);
+  const combinedDate = new Date(date);
+  combinedDate.setHours(hours, minutes, 0, 0);
+  return combinedDate;
+};
+
 // Generate unique reservation number
 const generateReservationNumber = async () => {
-  const currentDate = new Date();
-  const year = currentDate.getFullYear();
-  const month = String(currentDate.getMonth() + 1).padStart(2, '0');
-  const day = String(currentDate.getDate()).padStart(2, '0');
+  let reservationNumber;
+  let isUnique = false;
   
-  // Format: RES-YYYYMMDD-XXXX (e.g., RES-20251027-0001)
-  const datePrefix = `RES-${year}${month}${day}`;
-  
-  // Find the last reservation number for today
-  const lastReservation = await Reservation.findOne({
-    reservation_number: { $regex: `^${datePrefix}` }
-  }).sort({ reservation_number: -1 });
-  
-  let sequenceNumber = 1;
-  if (lastReservation) {
-    // Extract sequence number from last reservation
-    const lastSequence = parseInt(lastReservation.reservation_number.split('-')[2]);
-    sequenceNumber = lastSequence + 1;
+  // Keep generating until we get a unique number
+  while (!isUnique) {
+    reservationNumber = `RSV-${nanoid(8).toUpperCase()}`;
+    
+    // Check if this reservation number already exists
+    const existingReservation = await Reservation.findOne({
+      reservation_number: reservationNumber,
+      isDeleted: false
+    });
+    
+    if (!existingReservation) {
+      isUnique = true;
+    }
   }
   
-  // Pad sequence number to 4 digits
-  const paddedSequence = String(sequenceNumber).padStart(4, '0');
+  return reservationNumber;
+};
+
+// Check for reservation conflicts
+const checkReservationConflicts = async (reservationDate, startTime, duration, reservationType, excludeReservationId = null) => {
+  const requestedDate = new Date(reservationDate);
   
-  return `${datePrefix}-${paddedSequence}`;
+  // Calculate requested time range in minutes
+  let requestedStartMinutes, requestedEndMinutes;
+  
+  if (typeof startTime === 'string' && startTime.includes(':')) {
+    // Military time format
+    requestedStartMinutes = timeToMinutes(startTime);
+    requestedEndMinutes = requestedStartMinutes + duration;
+  } else {
+    // Legacy DateTime format
+    const requestedStartTime = new Date(startTime);
+    const requestedEndTime = new Date(requestedStartTime.getTime() + (duration * 60 * 1000));
+    
+    // Convert to minutes since midnight for comparison
+    requestedStartMinutes = requestedStartTime.getHours() * 60 + requestedStartTime.getMinutes();
+    requestedEndMinutes = requestedEndTime.getHours() * 60 + requestedEndTime.getMinutes();
+  }
+  
+  // Build query to find conflicting reservations on the same date
+  const conflictQuery = {
+    reservation_type: reservationType,
+    status: { $in: ['approved', 'active'] },
+    isDeleted: false,
+    // Same date check
+    $expr: {
+      $and: [
+        { $eq: [{ $year: '$reservation_date' }, { $year: requestedDate }] },
+        { $eq: [{ $month: '$reservation_date' }, { $month: requestedDate }] },
+        { $eq: [{ $dayOfMonth: '$reservation_date' }, { $dayOfMonth: requestedDate }] }
+      ]
+    }
+  };
+  
+  // Exclude current reservation if updating
+  if (excludeReservationId) {
+    conflictQuery._id = { $ne: excludeReservationId };
+  }
+  
+  const existingReservations = await Reservation.find(conflictQuery)
+    .populate('user_id', 'firstname lastname email id_number')
+    .sort({ start_time: 1, reservation_date: 1 });
+  
+  // Check for time conflicts
+  const conflictingReservations = existingReservations.filter(existing => {
+    let existingStartMinutes, existingEndMinutes;
+    
+    if (existing.start_time && typeof existing.start_time === 'string') {
+      // New format with military time
+      existingStartMinutes = timeToMinutes(existing.start_time);
+      existingEndMinutes = timeToMinutes(existing.end_time);
+    } else if (existing.reservation_date && existing.duration) {
+      // Legacy format
+      const existingStart = new Date(existing.reservation_date);
+      existingStartMinutes = existingStart.getHours() * 60 + existingStart.getMinutes();
+      existingEndMinutes = existingStartMinutes + existing.duration;
+    } else {
+      return false; // Skip if we can't determine the time
+    }
+    
+    // Check for overlap: (start1 < end2) && (start2 < end1)
+    return (requestedStartMinutes < existingEndMinutes) && (existingStartMinutes < requestedEndMinutes);
+  });
+  
+  return conflictingReservations;
 };
 
 // ==========================
@@ -128,26 +222,83 @@ router.get("/my-reservations", authMiddleware, async (req, res) => {
       });
     }
 
-    // Build filter
+    // Build filter based on user type
     const filter = { user_id: req.user._id, isDeleted: false };
     if (status) filter.status = status;
+
+    // Add reservation type filter based on user type
+    if (req.user.user_type === "student") {
+      filter.reservation_type = "computer";
+    } else if (req.user.user_type === "faculty") {
+      filter.reservation_type = "laboratory";
+    }
 
     // Pagination
     const skip = (parseInt(page) - 1) * parseInt(limit);
     
+    // Build populate array based on user type
+    const populateFields = [
+      { path: 'approved_by', select: 'firstname lastname username' }
+    ];
+
+    if (req.user.user_type === "student") {
+      // For students, populate computer data with laboratory info
+      populateFields.push({
+        path: 'computer_id',
+        select: 'pc_number status',
+        populate: {
+          path: 'laboratory_id',
+          select: 'name status'
+        }
+      });
+    } else if (req.user.user_type === "faculty") {
+      // For faculty, populate laboratory data
+      populateFields.push({
+        path: 'laboratory_id',
+        select: 'name status description'
+      });
+    } else {
+      // For other user types (if any), populate both
+      populateFields.push(
+        {
+          path: 'computer_id',
+          select: 'pc_number status',
+          populate: {
+            path: 'laboratory_id',
+            select: 'name status'
+          }
+        },
+        {
+          path: 'laboratory_id',
+          select: 'name status description'
+        }
+      );
+    }
+    
     const reservations = await Reservation.find(filter)
-      .populate('approved_by', 'firstname lastname username')
+      .populate(populateFields)
       .sort({ createdAt: -1 })
       .skip(skip)
       .limit(parseInt(limit));
 
     const total = await Reservation.countDocuments(filter);
 
+    // Customize message based on user type
+    let message = "Your reservations retrieved successfully";
+    if (req.user.user_type === "student") {
+      message = "Your computer reservations retrieved successfully";
+    } else if (req.user.user_type === "faculty") {
+      message = "Your laboratory reservations retrieved successfully";
+    }
+
     res.status(200).json({
       status: 200,
-      message: "Your reservations retrieved successfully",
+      message: message,
       data: {
         reservations,
+        user_type: req.user.user_type,
+        reservation_type_filter: req.user.user_type === "student" ? "computer" : 
+                                req.user.user_type === "faculty" ? "laboratory" : "all",
         pagination: {
           currentPage: parseInt(page),
           totalPages: Math.ceil(total / parseInt(limit)),
@@ -176,7 +327,16 @@ router.get("/:id", authMiddleware, async (req, res) => {
       isDeleted: false 
     })
       .populate('user_id', 'firstname lastname email id_number')
-      .populate('approved_by', 'firstname lastname username');
+      .populate('approved_by', 'firstname lastname username')
+      .populate({
+        path: 'computer_id',
+        select: 'pc_number status',
+        populate: {
+          path: 'laboratory_id',
+          select: 'name status'
+        }
+      })
+      .populate('laboratory_id', 'name status description');
 
     if (!reservation) {
       return res.status(404).json({
@@ -255,18 +415,109 @@ router.post("/", authMiddleware, async (req, res) => {
   try {
     const { 
       reservation_type, 
+      computer_id,
+      laboratory_id,
       reservation_date,
+      start_time,
+      end_time,
       purpose, 
       notes,
       duration
     } = req.body || {}; // Handle empty body
 
     // Validate required fields
-    if (!reservation_date || !reservation_type || !purpose || !duration) {
+    if (!reservation_type || !purpose || !reservation_date) {
       return res.status(400).json({
         status: 400,
-        message: "Reservation date, reservation type, purpose, and duration are required",
+        message: "Reservation type, purpose, and reservation date are required",
       });
+    }
+
+    // Validate reservation type and corresponding required fields
+    if (reservation_type === "computer" && !computer_id) {
+      return res.status(400).json({
+        status: 400,
+        message: "Computer ID is required for computer reservations",
+      });
+    }
+
+    if (reservation_type === "laboratory" && !laboratory_id) {
+      return res.status(400).json({
+        status: 400,
+        message: "Laboratory ID is required for laboratory reservations",
+      });
+    }
+
+    // Validate that we have either start/end times or duration
+    const hasStartEndTime = start_time && end_time;
+    const hasDuration = duration;
+
+    if (!hasStartEndTime && !hasDuration) {
+      return res.status(400).json({
+        status: 400,
+        message: "Either (start_time and end_time) or duration must be provided",
+      });
+    }
+
+    // Validate military time format if provided
+    if (hasStartEndTime) {
+      if (!isValidMilitaryTime(start_time)) {
+        return res.status(400).json({
+          status: 400,
+          message: "Start time must be in military time format (HH:MM, e.g., 14:30)",
+        });
+      }
+      if (!isValidMilitaryTime(end_time)) {
+        return res.status(400).json({
+          status: 400,
+          message: "End time must be in military time format (HH:MM, e.g., 16:45)",
+        });
+      }
+    }
+
+    // Calculate missing fields based on what's provided
+    let calculatedStartTime, calculatedEndTime, calculatedDuration, calculatedDate;
+
+    calculatedDate = new Date(reservation_date);
+
+    if (hasStartEndTime) {
+      // Using military time format
+      calculatedStartTime = start_time;
+      calculatedEndTime = end_time;
+      
+      // Calculate duration from military times
+      const startMinutes = timeToMinutes(start_time);
+      const endMinutes = timeToMinutes(end_time);
+      
+      if (endMinutes <= startMinutes) {
+        return res.status(400).json({
+          status: 400,
+          message: "End time must be after start time on the same day",
+        });
+      }
+      
+      calculatedDuration = endMinutes - startMinutes;
+    } else {
+      // Using duration - need to calculate military times
+      const parsedDuration = typeof duration === 'string' ? parseInt(duration) : duration;
+      
+      if (!parsedDuration || typeof parsedDuration !== 'number' || parsedDuration < 1 || parsedDuration > 480) {
+        return res.status(400).json({
+          status: 400,
+          message: "Duration must be a number between 1 and 480 minutes (8 hours)",
+        });
+      }
+      
+      // For legacy support, assume start time from reservation_date
+      const reservationDateTime = new Date(reservation_date);
+      const hours = reservationDateTime.getHours();
+      const minutes = reservationDateTime.getMinutes();
+      
+      calculatedStartTime = `${hours.toString().padStart(2, '0')}:${minutes.toString().padStart(2, '0')}`;
+      
+      const endMinutes = timeToMinutes(calculatedStartTime) + parsedDuration;
+      calculatedEndTime = minutesToTime(endMinutes);
+      calculatedDuration = parsedDuration;
     }
 
     // Validate reservation type
@@ -277,27 +528,110 @@ router.post("/", authMiddleware, async (req, res) => {
       });
     }
 
-    // Validate duration
-    if (typeof duration !== 'number' || duration < 1 || duration > 480) {
-      return res.status(400).json({
-        status: 400,
-        message: "Duration must be a number between 1 and 480 minutes (8 hours)",
+    // Validate computer/laboratory existence
+    let selectedComputer = null;
+    let selectedLaboratory = null;
+
+    if (reservation_type === "computer") {
+      selectedComputer = await Computer.findOne({ 
+        _id: computer_id, 
+        isDeleted: false 
+      }).populate('laboratory_id', 'name status');
+
+      if (!selectedComputer) {
+        return res.status(404).json({
+          status: 404,
+          message: "Computer not found or has been deleted",
+        });
+      }
+
+      if (selectedComputer.status === "out_of_order" || selectedComputer.status === "maintenance") {
+        return res.status(400).json({
+          status: 400,
+          message: `Computer is currently ${selectedComputer.status} and cannot be reserved`,
+        });
+      }
+    }
+
+    if (reservation_type === "laboratory") {
+      selectedLaboratory = await Laboratory.findOne({ 
+        _id: laboratory_id, 
+        isDeleted: false 
       });
+
+      if (!selectedLaboratory) {
+        return res.status(404).json({
+          status: 404,
+          message: "Laboratory not found or has been deleted",
+        });
+      }
+
+      if (selectedLaboratory.status === "inactive" || selectedLaboratory.status === "maintenance") {
+        return res.status(400).json({
+          status: 400,
+          message: `Laboratory is currently ${selectedLaboratory.status} and cannot be reserved`,
+        });
+      }
+    }
+
+    // Check for conflicts for laboratory reservations when user is faculty
+    let conflictingReservations = [];
+    if (reservation_type === "laboratory" && req.user.user_type === "faculty") {
+      conflictingReservations = await checkReservationConflicts(
+        calculatedDate,
+        calculatedStartTime, 
+        calculatedDuration, 
+        reservation_type
+      );
+      
+      if (conflictingReservations.length > 0) {
+        return res.status(409).json({
+          status: 409,
+          message: "Reservation conflict detected",
+          conflicts: conflictingReservations.map(conflict => ({
+            reservation_number: conflict.reservation_number,
+            user: `${conflict.user_id.firstname} ${conflict.user_id.lastname}`,
+            reservation_date: conflict.reservation_date,
+            duration: conflict.duration,
+            status: conflict.status
+          }))
+        });
+      }
     }
 
     // Generate unique reservation number
     const reservationNumber = await generateReservationNumber();
 
+    // Determine reservation status based on user type and reservation type
+    let reservationStatus = "pending";
+    let approvedBy = null;
+
+    if (req.userType === "admin") {
+      // Admins can auto-approve any reservation
+      reservationStatus = "approved";
+      approvedBy = req.user._id;
+    } else if (req.user.user_type === "faculty" && reservation_type === "laboratory") {
+      // Faculty can auto-approve laboratory reservations (after conflict check)
+      // Note: approved_by is left null since faculty are not admins in the system
+      reservationStatus = "approved";
+    }
+
     const reservation = new Reservation({
       user_id: req.user._id,
       reservation_number: reservationNumber,
       reservation_type,
-      reservation_date: new Date(reservation_date),
+      computer_id: reservation_type === "computer" ? computer_id : null,
+      laboratory_id: reservation_type === "laboratory" ? laboratory_id : null,
+      reservation_date: calculatedDate,
+      start_time: calculatedStartTime,
+      end_time: calculatedEndTime,
       purpose: purpose.trim(),
-      notes: notes?.trim() || null,
-      duration,
-      status: req.userType === "admin" ? "approved" : "pending", // Admins can auto-approve
-      approved_by: req.userType === "admin" ? req.user._id : null,
+      notes: req.user.user_type === "faculty" && reservation_type === "laboratory" && reservationStatus === "approved"
+        ? `${notes?.trim() || ''} [Auto-approved: Faculty laboratory reservation]`.trim()
+        : notes?.trim() || null,
+      duration: calculatedDuration,
+      status: reservationStatus,
+      approved_by: approvedBy,
     });
 
     await reservation.save();
@@ -305,12 +639,16 @@ router.post("/", authMiddleware, async (req, res) => {
     // Populate fields for response
     await reservation.populate([
       { path: 'user_id', select: 'firstname lastname email id_number' },
-      { path: 'approved_by', select: 'firstname lastname username' }
+      { path: 'approved_by', select: 'firstname lastname username' },
+      { path: 'computer_id', select: 'pc_number status', populate: { path: 'laboratory_id', select: 'name' } },
+      { path: 'laboratory_id', select: 'name status' }
     ]);
 
     res.status(201).json({
       status: 201,
-      message: "Reservation created successfully",
+      message: reservationStatus === "approved" 
+        ? "Reservation created and approved successfully" 
+        : "Reservation created successfully",
       data: reservation,
     });
   } catch (error) {
@@ -881,6 +1219,146 @@ router.get("/statistics/overview", adminAuthMiddleware, async (req, res) => {
     res.status(500).json({
       status: 500,
       message: "Failed to retrieve reservation statistics",
+      error: error.message,
+    });
+  }
+});
+
+// Check for reservation conflicts (useful for frontend validation)
+router.post("/check-conflicts", authMiddleware, async (req, res) => {
+  try {
+    const { 
+      reservation_type, 
+      reservation_date,
+      start_time,
+      end_time,
+      duration,
+      exclude_reservation_id
+    } = req.body || {};
+
+    // Validate required fields
+    if (!reservation_type || !reservation_date) {
+      return res.status(400).json({
+        status: 400,
+        message: "Reservation type and reservation date are required",
+      });
+    }
+
+    // Validate that we have either start/end times or duration
+    const hasStartEndTime = start_time && end_time;
+    const hasDuration = duration;
+
+    if (!hasStartEndTime && !hasDuration) {
+      return res.status(400).json({
+        status: 400,
+        message: "Either (start_time and end_time) or duration must be provided",
+      });
+    }
+
+    // Validate military time format if provided
+    if (hasStartEndTime) {
+      if (!isValidMilitaryTime(start_time)) {
+        return res.status(400).json({
+          status: 400,
+          message: "Start time must be in military time format (HH:MM, e.g., 14:30)",
+        });
+      }
+      if (!isValidMilitaryTime(end_time)) {
+        return res.status(400).json({
+          status: 400,
+          message: "End time must be in military time format (HH:MM, e.g., 16:45)",
+        });
+      }
+    }
+
+    // Calculate missing fields based on what's provided
+    let calculatedStartTime, calculatedDuration;
+
+    if (hasStartEndTime) {
+      // Using military time format
+      calculatedStartTime = start_time;
+      
+      // Calculate duration from military times
+      const startMinutes = timeToMinutes(start_time);
+      const endMinutes = timeToMinutes(end_time);
+      
+      if (endMinutes <= startMinutes) {
+        return res.status(400).json({
+          status: 400,
+          message: "End time must be after start time on the same day",
+        });
+      }
+      
+      calculatedDuration = endMinutes - startMinutes;
+    } else {
+      // Using duration - need to calculate military times
+      const parsedDuration = typeof duration === 'string' ? parseInt(duration) : duration;
+      
+      if (!parsedDuration || typeof parsedDuration !== 'number' || parsedDuration < 1 || parsedDuration > 480) {
+        return res.status(400).json({
+          status: 400,
+          message: "Duration must be a number between 1 and 480 minutes (8 hours)",
+        });
+      }
+      
+      // For legacy support, assume start time from reservation_date
+      const reservationDateTime = new Date(reservation_date);
+      const hours = reservationDateTime.getHours();
+      const minutes = reservationDateTime.getMinutes();
+      
+      calculatedStartTime = `${hours.toString().padStart(2, '0')}:${minutes.toString().padStart(2, '0')}`;
+      calculatedDuration = parsedDuration;
+    }
+
+    // Validate reservation type
+    if (!["laboratory", "computer"].includes(reservation_type)) {
+      return res.status(400).json({
+        status: 400,
+        message: "Reservation type must be either 'laboratory' or 'computer'",
+      });
+    }
+
+    // Validate duration
+    if (calculatedDuration < 1 || calculatedDuration > 480) {
+      return res.status(400).json({
+        status: 400,
+        message: "Duration must be between 1 and 480 minutes (8 hours)",
+      });
+    }
+
+    // Check for conflicts
+    const conflictingReservations = await checkReservationConflicts(
+      new Date(reservation_date),
+      calculatedStartTime, 
+      calculatedDuration, 
+      reservation_type,
+      exclude_reservation_id
+    );
+
+    const hasConflicts = conflictingReservations.length > 0;
+
+    res.status(200).json({
+      status: 200,
+      message: hasConflicts ? "Conflicts detected" : "No conflicts found",
+      has_conflicts: hasConflicts,
+      conflicts: hasConflicts ? conflictingReservations.map(conflict => ({
+        reservation_number: conflict.reservation_number,
+        user: `${conflict.user_id.firstname} ${conflict.user_id.lastname}`,
+        user_id: conflict.user_id._id,
+        reservation_date: conflict.reservation_date,
+        start_time: conflict.start_time || (conflict.reservation_date ? 
+          `${conflict.reservation_date.getHours().toString().padStart(2, '0')}:${conflict.reservation_date.getMinutes().toString().padStart(2, '0')}` : null),
+        end_time: conflict.end_time || (conflict.duration ? 
+          minutesToTime(timeToMinutes(conflict.start_time || '00:00') + conflict.duration) : null),
+        duration: conflict.duration,
+        status: conflict.status
+      })) : []
+    });
+  } catch (error) {
+    console.error("Check conflicts error:", error);
+    res.status(500).json({
+      status: 500,
+      message: "Failed to check for conflicts",
       error: error.message,
     });
   }

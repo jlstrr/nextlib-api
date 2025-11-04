@@ -460,11 +460,11 @@ router.get("/availability/:computer_id", authMiddleware, async (req, res) => {
       });
     }
 
-    // Validate duration (only 30 minutes and 1 hour allowed)
-    if (![30, 60].includes(parseInt(duration))) {
+    // Validate duration (only 30 minutes, 1 hour, and 2 hours allowed)
+    if (![30, 60, 120].includes(parseInt(duration))) {
       return res.status(400).json({
         status: 400,
-        message: "Duration must be either 30 or 60 minutes",
+        message: "Duration must be either 30, 60, or 120 minutes",
       });
     }
 
@@ -479,14 +479,32 @@ router.get("/availability/:computer_id", authMiddleware, async (req, res) => {
     const endOfDay = new Date(targetDate);
     endOfDay.setHours(23, 59, 59, 999);
 
-    // Get all reservations for the target date (simplified - no computer-specific reservations)
-    const reservations = await Reservation.find({
+    // Get all computer reservations for the target date and specific computer
+    const computerReservations = await Reservation.find({
       isDeleted: false,
+      reservation_type: "computer",
+      computer_id: computer_id,
       reservation_date: {
         $gte: startOfDay,
         $lte: endOfDay
-      }
-    });
+      },
+      status: { $in: ['pending', 'approved', 'active'] } // Include pending, approved and active reservations
+    }).populate('user_id', 'firstname lastname email id_number');
+
+    // Get all laboratory reservations for the target date that affect this computer's laboratory
+    const laboratoryReservations = await Reservation.find({
+      isDeleted: false,
+      reservation_type: "laboratory",
+      laboratory_id: computer.laboratory_id,
+      reservation_date: {
+        $gte: startOfDay,
+        $lte: endOfDay
+      },
+      status: { $in: ['pending', 'approved', 'active'] } // Include pending, approved and active reservations
+    }).populate('user_id', 'firstname lastname email id_number');
+
+    // Combine all reservations for conflict checking
+    const allReservations = [...computerReservations, ...laboratoryReservations];
 
     // Since the new model doesn't have time slots, we'll show basic availability
     const durationMinutes = parseInt(duration);
@@ -496,6 +514,12 @@ router.get("/availability/:computer_id", authMiddleware, async (req, res) => {
       const hours = Math.floor(minutes / 60);
       const mins = minutes % 60;
       return `${hours.toString().padStart(2, '0')}:${mins.toString().padStart(2, '0')}`;
+    };
+
+    // Helper function to convert military time to minutes since midnight
+    const timeToMinutes = (timeString) => {
+      const [hours, minutes] = timeString.split(':').map(Number);
+      return hours * 60 + minutes;
     };
     
     // Generate basic time slots for the day (8:00 AM to 5:00 PM)
@@ -519,8 +543,46 @@ router.get("/availability/:computer_id", authMiddleware, async (req, res) => {
       const currentTimeMinutes = now.getHours() * 60 + now.getMinutes();
       const isPast = targetDate.toDateString() === new Date().toDateString() && currentMinutes < currentTimeMinutes;
 
-      // With simplified model, we can't check specific time conflicts, so assume available if not past
-      const isAvailable = !isPast;
+      // Check for conflicts with existing reservations (both computer and laboratory)
+      const hasConflict = allReservations.some(reservation => {
+        let reservationStartMinutes, reservationEndMinutes;
+        
+        if (reservation.start_time && typeof reservation.start_time === 'string') {
+          // New format with military time
+          reservationStartMinutes = timeToMinutes(reservation.start_time);
+          reservationEndMinutes = timeToMinutes(reservation.end_time);
+        } else if (reservation.reservation_date && reservation.duration) {
+          // Legacy format
+          const reservationStart = new Date(reservation.reservation_date);
+          reservationStartMinutes = reservationStart.getHours() * 60 + reservationStart.getMinutes();
+          reservationEndMinutes = reservationStartMinutes + reservation.duration;
+        } else {
+          return false; // Skip if we can't determine the time
+        }
+        
+        // Check for overlap: (start1 < end2) && (start2 < end1)
+        return (currentMinutes < reservationEndMinutes) && (reservationStartMinutes < slotEndMinutes);
+      });
+
+      const isAvailable = !isPast && !hasConflict;
+
+      // Get conflicting reservations for this slot (both computer and laboratory)
+      const conflictingReservations = allReservations.filter(reservation => {
+        let reservationStartMinutes, reservationEndMinutes;
+        
+        if (reservation.start_time && typeof reservation.start_time === 'string') {
+          reservationStartMinutes = timeToMinutes(reservation.start_time);
+          reservationEndMinutes = timeToMinutes(reservation.end_time);
+        } else if (reservation.reservation_date && reservation.duration) {
+          const reservationStart = new Date(reservation.reservation_date);
+          reservationStartMinutes = reservationStart.getHours() * 60 + reservationStart.getMinutes();
+          reservationEndMinutes = reservationStartMinutes + reservation.duration;
+        } else {
+          return false;
+        }
+        
+        return (currentMinutes < reservationEndMinutes) && (reservationStartMinutes < slotEndMinutes);
+      });
 
       timeSlots.push({
         start_time: slotStartTime,
@@ -529,23 +591,40 @@ router.get("/availability/:computer_id", authMiddleware, async (req, res) => {
         end_time_formatted: slotEndTime,
         is_available: isAvailable,
         is_past: isPast,
-        duration_minutes: durationMinutes
+        has_conflict: hasConflict,
+        duration_minutes: durationMinutes,
+        conflicting_reservations: conflictingReservations.map(res => ({
+          id: res.id,
+          reservation_number: res.reservation_number,
+          reservation_type: res.reservation_type,
+          user: `${res.user_id.firstname} ${res.user_id.lastname}`,
+          start_time: res.start_time || minutesToTime(new Date(res.reservation_date).getHours() * 60 + new Date(res.reservation_date).getMinutes()),
+          end_time: res.end_time || minutesToTime((new Date(res.reservation_date).getHours() * 60 + new Date(res.reservation_date).getMinutes()) + res.duration),
+          duration: res.duration,
+          status: res.status,
+          purpose: res.purpose
+        }))
       });
     }
 
-    // Get reservation details for the day (simplified)
-    const dayReservations = reservations.map(reservation => ({
+    // Get reservation details for the day (both computer and laboratory reservations)
+    const dayReservations = allReservations.map(reservation => ({
       id: reservation.id,
+      reservation_number: reservation.reservation_number,
+      reservation_type: reservation.reservation_type,
       reservation_date: reservation.reservation_date,
+      start_time: reservation.start_time,
+      end_time: reservation.end_time,
       purpose: reservation.purpose,
       duration: reservation.duration,
       notes: reservation.notes,
-      reservation_type: reservation.reservation_type
+      status: reservation.status,
+      user: `${reservation.user_id.firstname} ${reservation.user_id.lastname}`
     }));
 
     res.status(200).json({
       status: 200,
-      message: "Computer availability retrieved successfully",
+      message: "Computer availability retrieved successfully (includes laboratory reservation conflicts)",
       data: {
         computer: {
           id: computer.id,
@@ -562,7 +641,13 @@ router.get("/availability/:computer_id", authMiddleware, async (req, res) => {
         total_slots: timeSlots.length,
         available_slots: timeSlots.filter(slot => slot.is_available).length,
         past_slots: timeSlots.filter(slot => slot.is_past).length,
-        existing_reservations: dayReservations
+        conflicted_slots: timeSlots.filter(slot => slot.has_conflict).length,
+        existing_reservations: dayReservations,
+        reservation_summary: {
+          computer_reservations: computerReservations.length,
+          laboratory_reservations: laboratoryReservations.length,
+          total_reservations: allReservations.length
+        }
       },
     });
   } catch (error) {
@@ -594,11 +679,11 @@ router.get("/laboratory/:laboratory_id/availability", authMiddleware, async (req
       });
     }
 
-    // Validate duration (only 30 minutes and 1 hour allowed)
-    if (![30, 60].includes(parseInt(duration))) {
+    // Validate duration (only 30 minutes, 1 hour, and 2 hours allowed)
+    if (![30, 60, 120].includes(parseInt(duration))) {
       return res.status(400).json({
         status: 400,
-        message: "Duration must be either 30 or 60 minutes",
+        message: "Duration must be either 30, 60, or 120 minutes",
       });
     }
 
@@ -627,14 +712,33 @@ router.get("/laboratory/:laboratory_id/availability", authMiddleware, async (req
       });
     }
 
-    // Get all reservations for the target date (simplified)
-    const reservations = await Reservation.find({
+    // Get all computer reservations for the target date in this laboratory
+    const computerIds = computers.map(comp => comp._id);
+    const computerReservations = await Reservation.find({
       isDeleted: false,
+      reservation_type: "computer",
+      computer_id: { $in: computerIds },
       reservation_date: {
         $gte: startOfDay,
         $lte: endOfDay
-      }
-    });
+      },
+      status: { $in: ['pending', 'approved', 'active'] } // Include pending, approved and active reservations
+    }).populate('user_id', 'firstname lastname email id_number');
+
+    // Get all laboratory reservations for the target date that affect this laboratory
+    const laboratoryReservations = await Reservation.find({
+      isDeleted: false,
+      reservation_type: "laboratory",
+      laboratory_id: laboratory_id,
+      reservation_date: {
+        $gte: startOfDay,
+        $lte: endOfDay
+      },
+      status: { $in: ['pending', 'approved', 'active'] } // Include pending, approved and active reservations
+    }).populate('user_id', 'firstname lastname email id_number');
+
+    // Combine all reservations for conflict checking
+    const allReservations = [...computerReservations, ...laboratoryReservations];
 
     // Simplified response - with the new model, we can't do complex time slot checking
     const durationMinutes = parseInt(duration);
@@ -644,6 +748,12 @@ router.get("/laboratory/:laboratory_id/availability", authMiddleware, async (req
       const hours = Math.floor(minutes / 60);
       const mins = minutes % 60;
       return `${hours.toString().padStart(2, '0')}:${mins.toString().padStart(2, '0')}`;
+    };
+
+    // Helper function to convert military time to minutes since midnight
+    const timeToMinutes = (timeString) => {
+      const [hours, minutes] = timeString.split(':').map(Number);
+      return hours * 60 + minutes;
     };
     
     // Generate basic time slots from 8:00 AM to 5:00 PM
@@ -664,9 +774,30 @@ router.get("/laboratory/:laboratory_id/availability", authMiddleware, async (req
       const currentTimeMinutes = now.getHours() * 60 + now.getMinutes();
       const isPast = targetDate.toDateString() === new Date().toDateString() && currentMinutes < currentTimeMinutes;
 
-      // Simplified availability - assume all computers are available if not past
+      // Check for conflicts with existing reservations (both computer and laboratory)
+      const hasConflict = allReservations.some(reservation => {
+        let reservationStartMinutes, reservationEndMinutes;
+        
+        if (reservation.start_time && typeof reservation.start_time === 'string') {
+          // New format with military time
+          reservationStartMinutes = timeToMinutes(reservation.start_time);
+          reservationEndMinutes = timeToMinutes(reservation.end_time);
+        } else if (reservation.reservation_date && reservation.duration) {
+          // Legacy format
+          const reservationStart = new Date(reservation.reservation_date);
+          reservationStartMinutes = reservationStart.getHours() * 60 + reservationStart.getMinutes();
+          reservationEndMinutes = reservationStartMinutes + reservation.duration;
+        } else {
+          return false; // Skip if we can't determine the time
+        }
+        
+        // Check for overlap: (start1 < end2) && (start2 < end1)
+        return (currentMinutes < reservationEndMinutes) && (reservationStartMinutes < slotEndMinutes);
+      });
+
+      // Calculate available computers considering conflicts
       const availableComputers = computers.filter(computer => 
-        computer.status === 'available' && !isPast
+        computer.status === 'available' && !isPast && !hasConflict
       );
 
       timeSlots.push({
@@ -677,6 +808,7 @@ router.get("/laboratory/:laboratory_id/availability", authMiddleware, async (req
         available_computers_count: availableComputers.length,
         total_computers: computers.length,
         is_past: isPast,
+        has_conflict: hasConflict,
         duration_minutes: durationMinutes
       });
     }
@@ -691,7 +823,7 @@ router.get("/laboratory/:laboratory_id/availability", authMiddleware, async (req
 
     res.status(200).json({
       status: 200,
-      message: "Laboratory computers availability retrieved successfully",
+      message: "Laboratory computers availability retrieved successfully (includes laboratory reservation conflicts)",
       data: {
         laboratory: {
           id: laboratory.id,
@@ -702,7 +834,12 @@ router.get("/laboratory/:laboratory_id/availability", authMiddleware, async (req
         duration_minutes: durationMinutes,
         time_slots: timeSlots,
         computers: computersSimple,
-        total_reservations_today: reservations.length,
+        total_reservations_today: allReservations.length,
+        reservation_summary: {
+          computer_reservations: computerReservations.length,
+          laboratory_reservations: laboratoryReservations.length,
+          total_reservations: allReservations.length
+        },
         summary: {
           total_computers: computers.length,
           available_computers: computers.filter(c => c.status === 'available').length,
