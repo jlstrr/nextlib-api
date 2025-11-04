@@ -27,7 +27,6 @@ const laboratorySchema = new mongoose.Schema(
 );
 
 // Index for better query performance
-laboratorySchema.index({ name: 1 });
 laboratorySchema.index({ status: 1 });
 
 // Virtual for id field (MongoDB uses _id by default)

@@ -102,7 +102,6 @@ const reservationSchema = new mongoose.Schema(
 );
 
 // Indexes for better query performance
-reservationSchema.index({ reservation_number: 1 });
 reservationSchema.index({ user_id: 1 });
 reservationSchema.index({ status: 1 });
 reservationSchema.index({ reservation_type: 1 });
