@@ -10,38 +10,26 @@ const router = Router();
 // 💻 COMPUTER ROUTES
 // ==========================
 
-// Get all computers
+// Get all computers (no pagination)
 router.get("/", authMiddleware, async (req, res) => {
   try {
-    const { laboratory_id, status, page = 1, limit = 10 } = req.query;
-    
+    const { laboratory_id, status } = req.query;
+
     // Build filter
     const filter = { isDeleted: false };
     if (laboratory_id) filter.laboratory_id = laboratory_id;
     if (status) filter.status = status;
 
-    // Pagination
-    const skip = (parseInt(page) - 1) * parseInt(limit);
-    
+    // Return all matching computers sorted by laboratory and pc_number
     const computers = await Computer.find(filter)
       .populate('laboratory_id', 'name status')
-      .sort({ laboratory_id: 1, pc_number: 1 })
-      .skip(skip)
-      .limit(parseInt(limit));
-
-    const total = await Computer.countDocuments(filter);
+      .sort({ laboratory_id: 1, pc_number: 1 });
 
     res.status(200).json({
       status: 200,
       message: "Computers retrieved successfully",
       data: {
-        computers,
-        pagination: {
-          currentPage: parseInt(page),
-          totalPages: Math.ceil(total / parseInt(limit)),
-          totalItems: total,
-          itemsPerPage: parseInt(limit),
-        },
+        computers
       },
     });
   } catch (error) {
@@ -54,11 +42,11 @@ router.get("/", authMiddleware, async (req, res) => {
   }
 });
 
-// Get computers by laboratory ID
+// Get computers by laboratory ID (no pagination)
 router.get("/laboratory/:laboratory_id", authMiddleware, async (req, res) => {
   try {
     const { laboratory_id } = req.params;
-    const { status, page = 1, limit = 50 } = req.query;
+    const { status } = req.query;
 
     // Verify laboratory exists
     const laboratory = await Laboratory.findOne({ 
@@ -77,16 +65,10 @@ router.get("/laboratory/:laboratory_id", authMiddleware, async (req, res) => {
     const filter = { laboratory_id, isDeleted: false };
     if (status) filter.status = status;
 
-    // Pagination
-    const skip = (parseInt(page) - 1) * parseInt(limit);
-
+    // Return all matching computers for the laboratory
     const computers = await Computer.find(filter)
       .populate('laboratory_id', 'name status')
-      .sort({ pc_number: 1 })
-      .skip(skip)
-      .limit(parseInt(limit));
-
-    const total = await Computer.countDocuments(filter);
+      .sort({ pc_number: 1 });
 
     res.status(200).json({
       status: 200,
@@ -97,13 +79,7 @@ router.get("/laboratory/:laboratory_id", authMiddleware, async (req, res) => {
           name: laboratory.name,
           status: laboratory.status,
         },
-        computers,
-        pagination: {
-          currentPage: parseInt(page),
-          totalPages: Math.ceil(total / parseInt(limit)),
-          totalItems: total,
-          itemsPerPage: parseInt(limit),
-        },
+        computers
       },
     });
   } catch (error) {
@@ -587,8 +563,6 @@ router.get("/availability/:computer_id", authMiddleware, async (req, res) => {
       timeSlots.push({
         start_time: slotStartTime,
         end_time: slotEndTime,
-        start_time_formatted: slotStartTime,
-        end_time_formatted: slotEndTime,
         is_available: isAvailable,
         is_past: isPast,
         has_conflict: hasConflict,

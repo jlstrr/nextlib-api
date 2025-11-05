@@ -73,7 +73,7 @@ const reservationSchema = new mongoose.Schema(
       type: Number, // Duration in minutes
       required: true,
       min: [1, "Duration must be at least 1 minute"],
-      max: [480, "Duration cannot exceed 8 hours (480 minutes)"]
+      max: [540, "Duration cannot exceed 9 hours (540 minutes)"]
     },
     status: {
       type: String,

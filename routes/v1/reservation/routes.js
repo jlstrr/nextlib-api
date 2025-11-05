@@ -40,6 +40,38 @@ const combineDateAndTime = (date, timeString) => {
   return combinedDate;
 };
 
+// Helper function to check if there's enough time remaining in the current day
+const hasEnoughTimeRemaining = (reservationDate, duration) => {
+  const now = new Date();
+  const reservation = new Date(reservationDate);
+  
+  // Check if the reservation is for today
+  const isToday = now.toDateString() === reservation.toDateString();
+  
+  if (!isToday) {
+    return { valid: true }; // Future dates are always valid
+  }
+  
+  // For today's reservations, check if there's enough time remaining
+  const currentHour = now.getHours();
+  const currentMinute = now.getMinutes();
+  const currentTimeInMinutes = currentHour * 60 + currentMinute;
+  
+  // Calculate end of day (assuming 24:00 or 1440 minutes)
+  const endOfDayInMinutes = 24 * 60; // 1440 minutes
+  const remainingMinutes = endOfDayInMinutes - currentTimeInMinutes;
+  
+  if (duration > remainingMinutes) {
+    return {
+      valid: false,
+      message: `Cannot reserve for ${duration} minutes. Only ${remainingMinutes} minutes remaining in the current day.`,
+      remainingMinutes
+    };
+  }
+  
+  return { valid: true };
+};
+
 // Generate unique reservation number
 const generateReservationNumber = async () => {
   let reservationNumber;
@@ -501,10 +533,10 @@ router.post("/", authMiddleware, async (req, res) => {
       // Using duration - need to calculate military times
       const parsedDuration = typeof duration === 'string' ? parseInt(duration) : duration;
       
-      if (!parsedDuration || typeof parsedDuration !== 'number' || parsedDuration < 1 || parsedDuration > 480) {
+      if (!parsedDuration || typeof parsedDuration !== 'number' || parsedDuration < 1 || parsedDuration > 540) {
         return res.status(400).json({
           status: 400,
-          message: "Duration must be a number between 1 and 480 minutes (8 hours)",
+          message: "Duration must be a number between 1 and 540 minutes (9 hours)",
         });
       }
       
@@ -572,6 +604,16 @@ router.post("/", authMiddleware, async (req, res) => {
           message: `Laboratory is currently ${selectedLaboratory.status} and cannot be reserved`,
         });
       }
+    }
+
+    // Check if there's enough time remaining for current day reservations
+    const timeCheck = hasEnoughTimeRemaining(calculatedDate, calculatedDuration);
+    if (!timeCheck.valid) {
+      return res.status(400).json({
+        status: 400,
+        message: timeCheck.message,
+        remaining_minutes: timeCheck.remainingMinutes
+      });
     }
 
     // Check for conflicts for laboratory reservations when user is faculty
@@ -774,10 +816,10 @@ router.patch("/:id", authMiddleware, async (req, res) => {
     if (purpose !== undefined) reservation.purpose = purpose.trim();
     if (notes !== undefined) reservation.notes = notes?.trim() || null;
     if (duration !== undefined) {
-      if (typeof duration !== 'number' || duration < 1 || duration > 480) {
+      if (typeof duration !== 'number' || duration < 1 || duration > 540) {
         return res.status(400).json({
           status: 400,
-          message: "Duration must be a number between 1 and 480 minutes (8 hours)",
+          message: "Duration must be a number between 1 and 540 minutes (9 hours)",
         });
       }
       reservation.duration = duration;
@@ -1294,10 +1336,10 @@ router.post("/check-conflicts", authMiddleware, async (req, res) => {
       // Using duration - need to calculate military times
       const parsedDuration = typeof duration === 'string' ? parseInt(duration) : duration;
       
-      if (!parsedDuration || typeof parsedDuration !== 'number' || parsedDuration < 1 || parsedDuration > 480) {
+      if (!parsedDuration || typeof parsedDuration !== 'number' || parsedDuration < 1 || parsedDuration > 540) {
         return res.status(400).json({
           status: 400,
-          message: "Duration must be a number between 1 and 480 minutes (8 hours)",
+          message: "Duration must be a number between 1 and 540 minutes (9 hours)",
         });
       }
       
@@ -1319,10 +1361,20 @@ router.post("/check-conflicts", authMiddleware, async (req, res) => {
     }
 
     // Validate duration
-    if (calculatedDuration < 1 || calculatedDuration > 480) {
+    if (calculatedDuration < 1 || calculatedDuration > 540) {
       return res.status(400).json({
         status: 400,
-        message: "Duration must be between 1 and 480 minutes (8 hours)",
+        message: "Duration must be between 1 and 540 minutes (9 hours)",
+      });
+    }
+
+    // Check if there's enough time remaining for current day reservations  
+    const timeCheck = hasEnoughTimeRemaining(reservation_date, calculatedDuration);
+    if (!timeCheck.valid) {
+      return res.status(400).json({
+        status: 400,
+        message: timeCheck.message,
+        remaining_minutes: timeCheck.remainingMinutes
       });
     }
 

@@ -34,6 +34,9 @@ const userSchema = new mongoose.Schema(
     // rejected_reservations_count: { type: Number, default: 0 },
     
     isDeleted: { type: Boolean, default: false },
+    // Password reset token and expiry for forgot-password flow
+    resetPasswordToken: { type: String, default: null },
+    resetPasswordExpires: { type: Date, default: null },
   },
   { timestamps: true }
 );

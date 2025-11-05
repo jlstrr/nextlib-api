@@ -44,6 +44,50 @@ router.get(
   }
 );
 
+// --- Change password for current logged-in user ---
+router.post(
+  "/change-password",
+  authMiddleware,
+  async (req, res) => {
+    try {
+      // Only allow non-admins to use this endpoint for user accounts
+      if (req.userType === "admin") {
+        return res.status(403).json({ message: "Admins should change their password via admin endpoints" });
+      }
+      // Note: We no longer require the current password here. The route
+      // is protected by authMiddleware so `req.user` is the authenticated user.
+      // We will accept only `new_password` and `confirm_password` and rely on
+      // the User model's pre-save hook to hash the new password.
+
+      const { new_password, confirm_password } = req.body;
+
+      if (!new_password || !confirm_password) {
+        return res.status(400).json({ message: "new_password and confirm_password are required" });
+      }
+
+      if (new_password !== confirm_password) {
+        return res.status(400).json({ message: "New password and confirmation do not match" });
+      }
+
+      if (new_password.length < 8) {
+        return res.status(400).json({ message: "New password must be at least 8 characters" });
+      }
+
+      // Fetch the full user record (so pre-save hook runs on save)
+      const user = await User.findById(req.user._id);
+      if (!user || user.isDeleted) return res.status(404).json({ message: "User not found" });
+
+      // Assign new password - the User pre('save') hook will hash it
+      user.password = new_password;
+      await user.save();
+
+      res.status(200).json({ status: 200, message: "Password changed successfully" });
+    } catch (err) {
+      res.status(500).json({ error: err.message });
+    }
+  }
+);
+
 // --- Dashboard Data (Protected) ---
 router.get("/dashboard", authMiddleware, async (req, res) => {
   try {

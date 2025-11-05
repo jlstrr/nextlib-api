@@ -5,40 +5,59 @@ import { adminAuthMiddleware, authMiddleware } from "../../../middleware/auth.js
 
 const router = Router();
 
+// Helper function to check if there's enough time remaining in the current day
+const hasEnoughTimeRemaining = (reservationDate, duration) => {
+  const now = new Date();
+  const reservation = new Date(reservationDate);
+  
+  // Check if the reservation is for today
+  const isToday = now.toDateString() === reservation.toDateString();
+  
+  if (!isToday) {
+    return { valid: true }; // Future dates are always valid
+  }
+  
+  // For today's reservations, check if there's enough time remaining
+  const currentHour = now.getHours();
+  const currentMinute = now.getMinutes();
+  const currentTimeInMinutes = currentHour * 60 + currentMinute;
+  
+  // Calculate end of day (assuming 24:00 or 1440 minutes)
+  const endOfDayInMinutes = 24 * 60; // 1440 minutes
+  const remainingMinutes = endOfDayInMinutes - currentTimeInMinutes;
+  
+  if (duration > remainingMinutes) {
+    return {
+      valid: false,
+      message: `Cannot reserve for ${duration} minutes. Only ${remainingMinutes} minutes remaining in the current day.`,
+      remainingMinutes
+    };
+  }
+  
+  return { valid: true };
+};
+
 // ==========================
 // 📊 LABORATORY ROUTES
 // ==========================
 
-// Get all laboratories
+// Get all laboratories (no pagination)
 router.get("/", authMiddleware, async (req, res) => {
   try {
-    const { status, page = 1, limit = 10 } = req.query;
-    
+    const { status } = req.query;
+
     // Build filter
     const filter = { isDeleted: false };
     if (status) filter.status = status;
 
-    // Pagination
-    const skip = (parseInt(page) - 1) * parseInt(limit);
-    
-    const laboratories = await Laboratory.find(filter)
-      .sort({ createdAt: -1 })
-      .skip(skip)
-      .limit(parseInt(limit));
-
-    const total = await Laboratory.countDocuments(filter);
+    // Return all matching laboratories sorted by creation date
+    const laboratories = await Laboratory.find(filter).sort({ createdAt: -1 });
 
     res.status(200).json({
       status: 200,
       message: "Laboratories retrieved successfully",
       data: {
-        laboratories,
-        pagination: {
-          currentPage: parseInt(page),
-          totalPages: Math.ceil(total / parseInt(limit)),
-          totalItems: total,
-          itemsPerPage: parseInt(limit),
-        },
+        laboratories
       },
     });
   } catch (error) {
@@ -285,14 +304,6 @@ router.get("/availability/:laboratory_id", authMiddleware, async (req, res) => {
       });
     }
 
-    // Validate duration (only 30 minutes, 1 hour, and 2 hours allowed)
-    if (![30, 60, 120].includes(parseInt(duration))) {
-      return res.status(400).json({
-        status: 400,
-        message: "Duration must be either 30, 60, or 120 minutes",
-      });
-    }
-
     // If no date provided, use today
     const targetDate = date ? new Date(date) : new Date();
     
@@ -303,6 +314,24 @@ router.get("/availability/:laboratory_id", authMiddleware, async (req, res) => {
     // Set date to end of day
     const endOfDay = new Date(targetDate);
     endOfDay.setHours(23, 59, 59, 999);
+
+    // Validate duration (30 minutes, 1 hour, 2 hours, and 9 hours for all-day)
+    if (![30, 60, 120, 540].includes(parseInt(duration))) {
+      return res.status(400).json({
+        status: 400,
+        message: "Duration must be either 30, 60, 120, or 540 minutes (all-day)",
+      });
+    }
+
+    // Check if there's enough time remaining for current day reservations
+    const timeCheck = hasEnoughTimeRemaining(targetDate, parseInt(duration));
+    if (!timeCheck.valid) {
+      return res.status(400).json({
+        status: 400,
+        message: timeCheck.message,
+        remaining_minutes: timeCheck.remainingMinutes
+      });
+    }
 
     // Get all laboratory reservations for the target date and specific laboratory
     const reservations = await Reservation.find({
@@ -331,10 +360,81 @@ router.get("/availability/:laboratory_id", authMiddleware, async (req, res) => {
       return hours * 60 + minutes;
     };
     
-    // Generate basic time slots for the day (8:00 AM to 5:00 PM)
+    // Generate time slots for the day
     const timeSlots = [];
     const startMinutes = 8 * 60; // 8:00 AM
     const endMinutes = 17 * 60;  // 5:00 PM
+    
+    // Special handling for all-day reservations (540 minutes)
+    if (durationMinutes === 540) {
+      // For all-day, create a single slot from 8:00 AM to 5:00 PM (9 hours = 540 minutes)
+      const slotStartTime = minutesToTime(startMinutes);
+      const slotEndTime = minutesToTime(endMinutes);
+
+      // Check if slot is in the past (only for today)
+      const now = new Date();
+      const currentTimeMinutes = now.getHours() * 60 + now.getMinutes();
+      const isPast = targetDate.toDateString() === new Date().toDateString() && startMinutes < currentTimeMinutes;
+
+      // Check for conflicts with existing reservations (any overlap means conflict)
+      const hasConflict = reservations.some(reservation => {
+        let reservationStartMinutes, reservationEndMinutes;
+        
+        if (reservation.start_time && typeof reservation.start_time === 'string') {
+          reservationStartMinutes = timeToMinutes(reservation.start_time);
+          reservationEndMinutes = timeToMinutes(reservation.end_time);
+        } else if (reservation.reservation_date && reservation.duration) {
+          const reservationStart = new Date(reservation.reservation_date);
+          reservationStartMinutes = reservationStart.getHours() * 60 + reservationStart.getMinutes();
+          reservationEndMinutes = reservationStartMinutes + reservation.duration;
+        } else {
+          return false;
+        }
+        
+        // For all-day, any overlap within working hours is a conflict
+        return (startMinutes < reservationEndMinutes) && (reservationStartMinutes < endMinutes);
+      });
+
+      const isAvailable = !isPast && !hasConflict;
+
+      // Get all conflicting reservations for the entire day
+      const conflictingReservations = reservations.filter(reservation => {
+        let reservationStartMinutes, reservationEndMinutes;
+        
+        if (reservation.start_time && typeof reservation.start_time === 'string') {
+          reservationStartMinutes = timeToMinutes(reservation.start_time);
+          reservationEndMinutes = timeToMinutes(reservation.end_time);
+        } else if (reservation.reservation_date && reservation.duration) {
+          const reservationStart = new Date(reservation.reservation_date);
+          reservationStartMinutes = reservationStart.getHours() * 60 + reservationStart.getMinutes();
+          reservationEndMinutes = reservationStartMinutes + reservation.duration;
+        } else {
+          return false;
+        }
+        
+        return (startMinutes < reservationEndMinutes) && (reservationStartMinutes < endMinutes);
+      });
+
+      timeSlots.push({
+        start_time: slotStartTime,
+        end_time: slotEndTime,
+        is_available: isAvailable,
+        is_past: isPast,
+        has_conflict: hasConflict,
+        duration_minutes: durationMinutes,
+        is_all_day: true,
+        conflicting_reservations: conflictingReservations.map(res => ({
+          id: res.id,
+          reservation_number: res.reservation_number,
+          user: `${res.user_id.firstname} ${res.user_id.lastname}`,
+          start_time: res.start_time || minutesToTime(new Date(res.reservation_date).getHours() * 60 + new Date(res.reservation_date).getMinutes()),
+          end_time: res.end_time || minutesToTime((new Date(res.reservation_date).getHours() * 60 + new Date(res.reservation_date).getMinutes()) + res.duration),
+          duration: res.duration,
+          status: res.status
+        }))
+      });
+    } else {
+      // Regular time slot generation for non-all-day durations
     
     for (let currentMinutes = startMinutes; currentMinutes < endMinutes; currentMinutes += durationMinutes) {
       const slotEndMinutes = currentMinutes + durationMinutes;
@@ -413,6 +513,7 @@ router.get("/availability/:laboratory_id", authMiddleware, async (req, res) => {
         }))
       });
     }
+    }
 
     // Get reservation details for the day
     const dayReservations = reservations.map(reservation => ({
@@ -440,6 +541,7 @@ router.get("/availability/:laboratory_id", authMiddleware, async (req, res) => {
         },
         date: targetDate.toISOString().split('T')[0],
         duration_minutes: parseInt(duration),
+        is_all_day: parseInt(duration) === 540,
         time_slots: timeSlots,
         total_slots: timeSlots.length,
         available_slots: timeSlots.filter(slot => slot.is_available).length,
