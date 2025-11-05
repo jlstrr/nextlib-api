@@ -8,6 +8,7 @@ import reservationV1 from "./v1/reservation/routes.js";
 import usageHistoryV1 from "./v1/usage-history/routes.js";
 import logsV1 from "./v1/logs/routes.js";
 import systemConfigV1 from "./v1/system-config/routes.js";
+import attendanceLogsV1 from "./v1/attendance-logs/routes.js";
 
 const router = Router();
 
@@ -21,5 +22,6 @@ router.use("/v1/reservations", reservationV1);
 router.use("/v1/usage-history", usageHistoryV1);
 router.use("/v1/logs", logsV1);
 router.use("/v1/system-config", systemConfigV1);
+router.use("/v1/attendance-logs", attendanceLogsV1);
 
 export default router;
