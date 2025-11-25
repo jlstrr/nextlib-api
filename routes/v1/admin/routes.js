@@ -1,5 +1,9 @@
 import { Router } from "express";
 import Admin from "../../../models/Admin.js";
+import User from "../../../models/User.js";
+import Computer from "../../../models/Computer.js";
+import UsageHistory from "../../../models/UsageHistory.js";
+import AttendanceLogs from "../../../models/AttendanceLogs.js";
 import { adminAuthMiddleware, authMiddleware, requireSuperAdmin } from "../../../middleware/auth.js";
 
 const router = Router();
@@ -66,7 +70,8 @@ router.post("/login", async (req, res) => {
         firstname: admin.firstname,
         lastname: admin.lastname,
         isSuperAdmin: admin.isSuperAdmin,
-        status: admin.status
+        status: admin.status,
+        email: admin.email
       },
       token // Optionally return token for client storage
     });
@@ -125,14 +130,232 @@ router.get("/status", (req, res) => {
 });
 
 // ==========================
+// 📊 DASHBOARD
+// ==========================
+
+// Get Admin Dashboard Data
+router.get("/dashboard", adminAuthMiddleware, async (req, res) => {
+  try {
+    const currentDate = new Date();
+    const startOfDay = new Date(currentDate.getFullYear(), currentDate.getMonth(), currentDate.getDate());
+    const endOfDay = new Date(startOfDay);
+    endOfDay.setDate(endOfDay.getDate() + 1);
+
+    // Get total number of admins (excluding super admin)
+    const totalAdmins = await Admin.countDocuments({ 
+      isSuperAdmin: false,
+      status: "active"
+    });
+
+    // Get total number of students
+    const totalStudents = await User.countDocuments({ 
+      isDeleted: false,
+      status: "active"
+    });
+
+    // Get number of active users (users currently using computers based on usage history)
+    const activeUsers = await UsageHistory.countDocuments({
+      status: "active",
+      isDeleted: false
+    });
+
+    // Get number of available computers
+    const availableComputers = await Computer.countDocuments({
+      status: "available",
+      isDeleted: false
+    });
+
+    // Get recent activity from attendance logs (last 10)
+    const recentActivity = await AttendanceLogs.find({ isDeleted: false })
+      .sort({ logged_at: -1 })
+      .limit(10)
+      .lean();
+
+    // Manually fetch user data for students
+    const formattedActivity = await Promise.all(recentActivity.map(async (log) => {
+      if (log.user_type === "student" && log.id_number) {
+        const user = await User.findOne({ id_number: log.id_number })
+          .select('id_number firstname middle_initial lastname program_course')
+          .lean();
+        
+        if (user) {
+          return {
+            id: log._id,
+            type: "Scanned Student",
+            description: `Scanned Student with ID number: ${user.id_number} for ${log.purpose}`,
+            user: {
+              id_number: user.id_number,
+              name: `${user.firstname}${user.middle_initial ? ' ' + user.middle_initial : ''} ${user.lastname}`,
+              program_course: user.program_course
+            },
+            timestamp: log.logged_at,
+            time_ago: getTimeAgo(log.logged_at)
+          };
+        } else {
+          return {
+            id: log._id,
+            type: "Scanned Student",
+            description: `Scanned Student with ID number: ${log.id_number} for ${log.purpose}`,
+            user: {
+              id_number: log.id_number,
+              name: "Unknown User",
+              program_course: null
+            },
+            timestamp: log.logged_at,
+            time_ago: getTimeAgo(log.logged_at)
+          };
+        }
+      } else {
+        return {
+          id: log._id,
+          type: "Scanned Visitor",
+          description: `Scanned Visitor: ${log.name} for ${log.purpose}`,
+          visitor: {
+            name: log.name,
+            address: log.address
+          },
+          timestamp: log.logged_at,
+          time_ago: getTimeAgo(log.logged_at)
+        };
+      }
+    }));
+
+    // Get monthly usage data for chart (last 12 months)
+    const twelveMonthsAgo = new Date();
+    twelveMonthsAgo.setMonth(twelveMonthsAgo.getMonth() - 11);
+    twelveMonthsAgo.setDate(1);
+    twelveMonthsAgo.setHours(0, 0, 0, 0);
+
+    const monthlyUsage = await UsageHistory.aggregate([
+      {
+        $match: {
+          date: { $gte: twelveMonthsAgo },
+          isDeleted: false
+        }
+      },
+      {
+        $group: {
+          _id: {
+            year: { $year: "$date" },
+            month: { $month: "$date" }
+          },
+          totalHours: { $sum: { $divide: ["$duration", 60] } },
+          sessionCount: { $sum: 1 }
+        }
+      },
+      {
+        $sort: { "_id.year": 1, "_id.month": 1 }
+      }
+    ]);
+
+    // Create array of all 12 months with data
+    const monthNames = ["Jan", "Feb", "Mar", "Apr", "May", "Jun", "Jul", "Aug", "Sep", "Oct", "Nov", "Dec"];
+    const monthlyChartData = [];
+    
+    for (let i = 0; i < 12; i++) {
+      const date = new Date(twelveMonthsAgo);
+      date.setMonth(date.getMonth() + i);
+      const year = date.getFullYear();
+      const month = date.getMonth() + 1;
+      
+      const existingData = monthlyUsage.find(
+        item => item._id.year === year && item._id.month === month
+      );
+      
+      monthlyChartData.push({
+        month: monthNames[month - 1],
+        year: year,
+        totalHours: existingData ? Math.round(existingData.totalHours) : 0,
+        sessionCount: existingData ? existingData.sessionCount : 0
+      });
+    }
+
+    // Prepare dashboard response
+    const dashboardData = {
+      statistics: {
+        total_admins: totalAdmins,
+        total_students: totalStudents,
+        active_users: activeUsers,
+        available_computers: availableComputers
+      },
+      recent_activity: formattedActivity,
+      monthly_usage_chart: monthlyChartData
+    };
+
+    res.status(200).json({
+      status: 200,
+      message: "Admin dashboard data retrieved successfully",
+      data: dashboardData
+    });
+
+  } catch (err) {
+    console.error("Admin dashboard error:", err);
+    res.status(500).json({ 
+      status: 500,
+      message: "Failed to retrieve admin dashboard data",
+      error: err.message 
+    });
+  }
+});
+
+// Helper function to calculate time ago
+function getTimeAgo(date) {
+  const seconds = Math.floor((new Date() - new Date(date)) / 1000);
+  
+  let interval = Math.floor(seconds / 31536000);
+  if (interval >= 1) return interval + " year" + (interval === 1 ? "" : "s") + " ago";
+  
+  interval = Math.floor(seconds / 2592000);
+  if (interval >= 1) return interval + " month" + (interval === 1 ? "" : "s") + " ago";
+  
+  interval = Math.floor(seconds / 86400);
+  if (interval >= 1) return interval + " day" + (interval === 1 ? "" : "s") + " ago";
+  
+  interval = Math.floor(seconds / 3600);
+  if (interval >= 1) return interval + " hour" + (interval === 1 ? "" : "s") + " ago";
+  
+  interval = Math.floor(seconds / 60);
+  if (interval >= 1) return interval + " min" + (interval === 1 ? "" : "s") + " ago";
+  
+  return "just now";
+}
+
+// ==========================
 // 📦 CRUD ROUTES (SuperAdmin only)
 // ==========================
 
 // Get All Admins
-router.get("/", requireSuperAdmin, async (req, res) => {
+router.get("/", authMiddleware, async (req, res) => {
   try {
-    const admins = await Admin.find({ isSuperAdmin: false }).select("-password");
-    res.status(200).json({ status: 200, message: "Admins retrieved successfully", data: admins });
+    const { page = 1, limit = 10 } = req.query;
+    const filter = { isSuperAdmin: false };
+    
+    // Convert to numbers and validate
+    const pageNum = Math.max(1, parseInt(page));
+    const limitNum = Math.max(1, Math.min(100, parseInt(limit))); // Max 100 items per page
+    const skip = (pageNum - 1) * limitNum;
+    
+    // Get total count for pagination metadata
+    const total = await Admin.countDocuments(filter);
+    
+    // Fetch paginated admins
+    const admins = await Admin.find(filter)
+      .select("-password")
+      .skip(skip)
+      .limit(limitNum)
+      .sort({ createdAt: -1 }); // Sort by newest first
+    
+    res.status(200).json({ 
+      status: 200, 
+      message: "Admins retrieved successfully", 
+      data: admins,
+      pagination: {
+        currentPage: parseInt(page),
+        totalPages: Math.ceil(total / parseInt(limit)),
+        totalItems: total,
+        itemsPerPage: parseInt(limit),
+      }
+    });
   } catch (err) {
     res.status(500).json({ error: err.message });
   }
