@@ -309,10 +309,10 @@ router.patch("/:id/status", adminAuthMiddleware, async (req, res) => {
     const { id } = req.params;
     const { status } = req.body;
 
-    if (!status || !["available", "occupied", "maintenance", "out_of_order"].includes(status)) {
+    if (!status || !["available", "occupied", "maintenance", "out_of_order", "reserved", "locked"].includes(status)) {
       return res.status(400).json({
         status: 400,
-        message: "Valid status is required (available, occupied, maintenance, out_of_order)",
+        message: "Valid status is required (available, occupied, maintenance, out_of_order, reserved, locked)",
       });
     }
 

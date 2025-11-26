@@ -336,6 +336,75 @@ router.get("/dashboard", authMiddleware, async (req, res) => {
   }
 });
 
+// --- Create a new user (admin only) ---
+router.post(
+  "/",
+  adminAuthMiddleware,
+  async (req, res) => {
+    try {
+      const {
+        id_number,
+        firstname,
+        middle_initial,
+        lastname,
+        program_course,
+        email,
+        password,
+        user_type,
+        remaining_time
+      } = req.body;
+
+      // Validate required fields
+      if (!id_number || !firstname || !lastname || !email || !password) {
+        return res.status(400).json({ 
+          message: "Missing required fields: id_number, firstname, lastname, email, password" 
+        });
+      }
+
+      // Check if user already exists
+      const existingUser = await User.findOne({ 
+        $or: [{ id_number }, { email }],
+        isDeleted: false 
+      });
+
+      if (existingUser) {
+        return res.status(409).json({ 
+          message: "User with this ID number or email already exists" 
+        });
+      }
+
+      // Create new user
+      const newUser = new User({
+        id_number,
+        firstname,
+        middle_initial: middle_initial || "",
+        lastname,
+        program_course: program_course || "",
+        email,
+        password, // Will be hashed by pre-save hook
+        user_type: user_type || "student",
+        remaining_time: remaining_time || "03:00:00",
+        status: "active"
+      });
+
+      await newUser.save();
+
+      // Return user without password
+      const userResponse = newUser.toObject();
+      delete userResponse.password;
+      delete userResponse.__v;
+
+      res.status(201).json({ 
+        status: 201, 
+        message: "User created successfully", 
+        data: userResponse 
+      });
+    } catch (err) {
+      res.status(500).json({ error: err.message });
+    }
+  }
+);
+
 // --- Get all users (admin only) ---
 router.get(
   "/",

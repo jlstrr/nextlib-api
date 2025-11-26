@@ -130,8 +130,8 @@ router.post(
 // Get all attendance logs (Admin only)
 router.get(
   "/",
-  adminAuthMiddleware,
-  authorizeRoles("admin", "super_admin"),
+  authMiddleware,
+  // authorizeRoles("admin", "super_admin"),
   async (req, res) => {
     try {
       const {
