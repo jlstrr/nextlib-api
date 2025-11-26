@@ -27,9 +27,19 @@ app.use(express.json());
 app.use(cookieParser());
 
 // CORS configuration
+const defaultOrigins = [
+  'https://www.nextlib-system.online',
+  'http://localhost:5173',
+  'http://192.168.100.46:5173'
+];
+
+const allowedOrigins = process.env.FRONTEND_URL
+  ? [process.env.FRONTEND_URL, ...defaultOrigins]
+  : defaultOrigins;
+
 app.use(cors({
-  origin: process.env.FRONTEND_URL ? [process.env.FRONTEND_URL] : ['https://www.nextlib-system.online', 'http://localhost:5173', 'http://192.168.100.46:5173'], // Allow your frontend origins
-  credentials: true, // Allow cookies and credentials
+  origin: allowedOrigins,
+  credentials: true,
   methods: ['GET', 'POST', 'PUT', 'DELETE', 'OPTIONS', 'PATCH'],
   allowedHeaders: ['Content-Type', 'Authorization', 'X-Requested-With']
 }));
