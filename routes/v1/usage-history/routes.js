@@ -98,7 +98,7 @@ router.get("/my-history", authMiddleware, async (req, res) => {
     const skip = (parseInt(page) - 1) * parseInt(limit);
     
     const usageHistories = await UsageHistory.find(filter)
-      .populate('reservation_id', 'reservation_type status')
+      .populate('reservation_id', 'reservation_type status reservation_number')
       .populate('approved_by', 'firstname lastname username')
       .sort({ date: -1, time_in: -1 })
       .skip(skip)
@@ -173,7 +173,7 @@ router.get("/:id", authMiddleware, async (req, res) => {
 });
 
 // Start usage session from reservation (Admin only)
-router.post("/start-session", adminAuthMiddleware, async (req, res) => {
+router.post("/start-session", authMiddleware, async (req, res) => {
   try {
     const { reservation_id, time_in, notes } = req.body;
 
@@ -271,7 +271,7 @@ router.post("/start-session", adminAuthMiddleware, async (req, res) => {
 });
 
 // End usage session (Admin only)
-router.patch("/:id/end-session", adminAuthMiddleware, async (req, res) => {
+router.patch("/:id/end-session", authMiddleware, async (req, res) => {
   try {
     const { id } = req.params;
     const { 
@@ -475,6 +475,128 @@ router.get("/statistics/overview", adminAuthMiddleware, async (req, res) => {
       status: 500,
       message: "Failed to retrieve usage statistics",
       error: error.message,
+    });
+  }
+});
+
+// ==========================
+// 📊 USAGE REPORTS ROUTE (Admin only)
+// ==========================
+
+router.get("/reports/:type", authMiddleware, async (req, res) => {
+  try {
+    const { type } = req.params;
+    const { user_id, user_type, program, date_from, date_to } = req.query;
+
+    const matchFilter = { isDeleted: false };
+
+    // 🔍 Filter by specific user
+    if (user_id) matchFilter.userId = user_id;
+
+    // 🔍 Filter by type of user (Student/Faculty)
+    if (user_type) matchFilter.userType = user_type;
+
+    // 🔍 Filter by program (BSIT, BSED, etc.)
+    if (program) matchFilter.program = program;
+
+    // 🔍 Date filters
+    if (date_from || date_to) {
+      matchFilter.date = {};
+      if (date_from) matchFilter.date.$gte = new Date(date_from);
+      if (date_to) matchFilter.date.$lte = new Date(date_to);
+    }
+
+    // ======================
+    // GROUPING STAGE
+    // ======================
+    let groupStage;
+    if (type === "daily") {
+      groupStage = {
+        _id: {
+          year: { $year: "$date" },
+          month: { $month: "$date" },
+          day: { $dayOfMonth: "$date" }
+        },
+        sessions: { $sum: 1 },
+        totalDuration: { $sum: "$duration" },
+        facultyCount: {
+          $sum: {
+            $cond: [{ $eq: ["$userType", "Faculty"] }, 1, 0]
+          }
+        },
+        studentCount: {
+          $sum: {
+            $cond: [{ $eq: ["$userType", "Student"] }, 1, 0]
+          }
+        }
+      };
+
+    } else if (type === "monthly") {
+      groupStage = {
+        _id: {
+          year: { $year: "$date" },
+          month: { $month: "$date" }
+        },
+        sessions: { $sum: 1 },
+        totalDuration: { $sum: "$duration" },
+        facultyCount: {
+          $sum: {
+            $cond: [{ $eq: ["$userType", "Faculty"] }, 1, 0]
+          }
+        },
+        studentCount: {
+          $sum: {
+            $cond: [{ $eq: ["$userType", "Student"] }, 1, 0]
+          }
+        }
+      };
+
+    } else if (type === "yearly") {
+      groupStage = {
+        _id: { year: { $year: "$date" } },
+        sessions: { $sum: 1 },
+        totalDuration: { $sum: "$duration" },
+        facultyCount: {
+          $sum: {
+            $cond: [{ $eq: ["$userType", "Faculty"] }, 1, 0]
+          }
+        },
+        studentCount: {
+          $sum: {
+            $cond: [{ $eq: ["$userType", "Student"] }, 1, 0]
+          }
+        }
+      };
+
+    } else {
+      return res.status(400).json({
+        status: 400,
+        message: "Invalid report type. Use daily, monthly, or yearly."
+      });
+    }
+
+    // ======================
+    // AGGREGATION PIPELINE
+    // ======================
+    const report = await UsageHistory.aggregate([
+      { $match: matchFilter },
+      { $group: groupStage },
+      { $sort: { "_id.year": -1, "_id.month": -1, "_id.day": -1 } }
+    ]);
+
+    res.status(200).json({
+      status: 200,
+      message: `${type} usage report retrieved successfully`,
+      filters_used: { user_id, user_type, program, date_from, date_to },
+      data: report
+    });
+
+  } catch (error) {
+    console.error("Get usage report error:", error);
+    res.status(500).json({
+      status: 500,
+      message: "Failed to retrieve usage report",
+      error: error.message
     });
   }
 });

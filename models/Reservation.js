@@ -77,7 +77,7 @@ const reservationSchema = new mongoose.Schema(
     },
     status: {
       type: String,
-      enum: ["pending", "approved", "rejected", "active", "completed", "cancelled"],
+      enum: ["pending", "approved", "active", "completed", "cancelled"],
       default: "pending",
     },
     approved_by: {

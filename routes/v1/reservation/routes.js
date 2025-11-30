@@ -656,6 +656,28 @@ router.post("/", authMiddleware, async (req, res) => {
       // Faculty can auto-approve laboratory reservations (after conflict check)
       // Note: approved_by is left null since faculty are not admins in the system
       reservationStatus = "approved";
+        // Send email notification to faculty about auto-approval
+        try {
+          const mailer = require("../../../utils/mailer.js");
+          await mailer.sendMail({
+            to: req.user.email,
+            subject: "Laboratory Reservation Auto-Approved",
+            html: `<p>Dear ${req.user.firstname} ${req.user.lastname},</p>
+              <p>Your laboratory reservation has been <b>auto-approved</b>.</p>
+              <ul>
+                <li><b>Reservation Number:</b> ${reservationNumber}</li>
+                <li><b>Laboratory:</b> ${selectedLaboratory?.name || "N/A"}</li>
+                <li><b>Date:</b> ${calculatedDate.toLocaleDateString()}</li>
+                <li><b>Start Time:</b> ${calculatedStartTime}</li>
+                <li><b>End Time:</b> ${calculatedEndTime}</li>
+                <li><b>Duration:</b> ${calculatedDuration} minutes</li>
+                <li><b>Purpose:</b> ${purpose.trim()}</li>
+              </ul>
+              <p>If you have any questions, please contact the admin.</p>`
+          });
+        } catch (mailError) {
+          console.error("Failed to send auto-approval email to faculty:", mailError);
+        }
     }
 
     const reservation = new Reservation({

@@ -175,7 +175,7 @@ router.get("/dashboard", adminAuthMiddleware, async (req, res) => {
     const formattedActivity = await Promise.all(recentActivity.map(async (log) => {
       if (log.user_type === "student" && log.id_number) {
         const user = await User.findOne({ id_number: log.id_number })
-          .select('id_number firstname middle_initial lastname program_course')
+          .select('id_number firstname middle_initial lastname program_course yearLevel')
           .lean();
         
         if (user) {
@@ -186,7 +186,8 @@ router.get("/dashboard", adminAuthMiddleware, async (req, res) => {
             user: {
               id_number: user.id_number,
               name: `${user.firstname}${user.middle_initial ? ' ' + user.middle_initial : ''} ${user.lastname}`,
-              program_course: user.program_course
+              program_course: user.program_course,
+              yearLevel: user.yearLevel
             },
             timestamp: log.logged_at,
             time_ago: getTimeAgo(log.logged_at)

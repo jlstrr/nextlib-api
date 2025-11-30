@@ -10,7 +10,8 @@ const userSchema = new mongoose.Schema(
     middle_initial: { type: String },
     lastname: { type: String, required: true },
 
-    program_course: { type: String }, // e.g., BSCS, BSIT, etc.
+    program_course: { type: String, default: null }, // e.g., BSCS, BSIT, etc.
+    yearLevel: { type: String, default: null }, // e.g., 1st year, 2nd year, etc.
 
     email: { type: String, required: true, unique: true },
     password: { type: String, required: true },

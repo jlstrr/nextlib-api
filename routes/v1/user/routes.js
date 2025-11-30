@@ -23,13 +23,14 @@ router.get(
       res.status(200).json({ 
         status: 200, 
         message: "User profile retrieved successfully", 
-        data: {
+        user: {
           id: user._id,
           id_number: user.id_number,
           firstname: user.firstname,
           middle_initial: user.middle_initial,
           lastname: user.lastname,
           program_course: user.program_course,
+          yearLevel: user.yearLevel,
           email: user.email,
           user_type: user.user_type,
           status: user.status,
@@ -348,6 +349,7 @@ router.post(
         middle_initial,
         lastname,
         program_course,
+        yearLevel,
         email,
         password,
         user_type,
@@ -379,11 +381,12 @@ router.post(
         firstname,
         middle_initial: middle_initial || "",
         lastname,
-        program_course: program_course || "",
+        program_course: program_course,
+        yearLevel: yearLevel,
         email,
         password, // Will be hashed by pre-save hook
         user_type: user_type || "student",
-        remaining_time: remaining_time || "03:00:00",
+        remaining_time: remaining_time,
         status: "active"
       });
 
@@ -476,6 +479,10 @@ router.put(
   // authorizeRoles("admin"),
   async (req, res) => {
     try {
+      // const updateFields = { ...req.body };
+      // if (typeof req.body.yearLevel !== "undefined") {
+      //   updateFields.yearLevel = req.body.yearLevel;
+      // }
       const updatedUser = await User.findByIdAndUpdate(
         req.params.id,
         req.body,
