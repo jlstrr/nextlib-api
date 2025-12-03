@@ -1,5 +1,5 @@
 import { Router } from "express";
-import SystemConfig from "../../../models/SystemConfig.js";
+import AcademicConfig from "../../../models/AcademicConfig.js";
 import { adminAuthMiddleware, authMiddleware, requireSuperAdmin } from "../../../middleware/auth.js";
 
 const router = Router();
@@ -11,18 +11,25 @@ const router = Router();
 // Get current active system configuration (All authenticated users)
 router.get("/current", authMiddleware, async (req, res) => {
   try {
-    const config = await SystemConfig.getCurrentConfig();
+    const config = await AcademicConfig.getCurrent();
+    if (config) {
+      const current = config.computeActiveSemester();
+      if (config.active_semester !== current) {
+        config.active_semester = current;
+        await config.save();
+      }
+    }
     
     if (!config) {
       return res.status(404).json({
         status: 404,
-        message: "No active system configuration found",
+      message: "No active academic configuration found",
       });
     }
 
     res.status(200).json({
       status: 200,
-      message: "Current system configuration retrieved successfully",
+      message: "Current academic configuration retrieved successfully",
       data: config,
     });
   } catch (error) {
@@ -38,28 +45,28 @@ router.get("/current", authMiddleware, async (req, res) => {
 // Get all system configurations (Admin only)
 router.get("/", adminAuthMiddleware, async (req, res) => {
   try {
-    const { page = 1, limit = 10, school_year, semester } = req.query;
+    const { page = 1, limit = 10, school_year } = req.query;
     
     // Build filter
     const filter = {};
     if (school_year) filter.school_year = school_year;
-    if (semester) filter.semester = semester;
+    
 
     // Pagination
     const skip = (parseInt(page) - 1) * parseInt(limit);
     
-    const configs = await SystemConfig.find(filter)
+    const configs = await AcademicConfig.find(filter)
       .populate('created_by', 'firstname lastname username')
       .populate('last_modified_by', 'firstname lastname username')
       .sort({ createdAt: -1 })
       .skip(skip)
       .limit(parseInt(limit));
 
-    const total = await SystemConfig.countDocuments(filter);
+    const total = await AcademicConfig.countDocuments(filter);
 
     res.status(200).json({
       status: 200,
-      message: "System configurations retrieved successfully",
+      message: "Academic configurations retrieved successfully",
       data: {
         configs,
         pagination: {
@@ -85,20 +92,20 @@ router.get("/:id", adminAuthMiddleware, async (req, res) => {
   try {
     const { id } = req.params;
 
-    const config = await SystemConfig.findById(id)
+    const config = await AcademicConfig.findById(id)
       .populate('created_by', 'firstname lastname username')
       .populate('last_modified_by', 'firstname lastname username');
 
     if (!config) {
       return res.status(404).json({
         status: 404,
-        message: "System configuration not found",
+      message: "Academic configuration not found",
       });
     }
 
     res.status(200).json({
       status: 200,
-      message: "System configuration retrieved successfully",
+      message: "Academic configuration retrieved successfully",
       data: config,
     });
   } catch (error) {
@@ -114,28 +121,27 @@ router.get("/:id", adminAuthMiddleware, async (req, res) => {
 // Create new system configuration (SuperAdmin only)
 router.post("/", requireSuperAdmin, async (req, res) => {
   try {
-    const { 
-      default_hours, 
-      school_year, 
-      semester, 
-      notes,
-      make_active = false 
-    } = req.body;
+    const { school_year, notes, make_active = false } = req.body;
+    const { first_semester_start, first_semester_end, second_semester_start, second_semester_end, summer_start, summer_end } = req.body;
 
     // Validate required fields
-    if (!default_hours || !school_year || !semester) {
+    if (!school_year || !first_semester_start || !first_semester_end || !second_semester_start || !second_semester_end) {
       return res.status(400).json({
         status: 400,
-        message: "Default hours, school year, and semester are required",
+        message: "School year and both semesters' start and end dates are required",
       });
     }
 
     // Validate default_hours range
-    if (default_hours < 1 || default_hours > 24) {
-      return res.status(400).json({
-        status: 400,
-        message: "Default hours must be between 1 and 24",
-      });
+    const fsStart = new Date(first_semester_start);
+    const fsEnd = new Date(first_semester_end);
+    const ssStart = new Date(second_semester_start);
+    const ssEnd = new Date(second_semester_end);
+    if (isNaN(fsStart.getTime()) || isNaN(fsEnd.getTime()) || isNaN(ssStart.getTime()) || isNaN(ssEnd.getTime())) {
+      return res.status(400).json({ status: 400, message: "Invalid semester dates" });
+    }
+    if (fsStart > fsEnd || ssStart > ssEnd) {
+      return res.status(400).json({ status: 400, message: "Semester start date must be before end date" });
     }
 
     // Validate school year format
@@ -146,37 +152,42 @@ router.post("/", requireSuperAdmin, async (req, res) => {
       });
     }
 
-    // Validate semester
-    if (!["1st", "2nd", "summer"].includes(semester)) {
-      return res.status(400).json({
-        status: 400,
-        message: "Semester must be '1st', '2nd', or 'summer'",
-      });
+    const semesters = [
+      { name: "1st", start_date: fsStart, end_date: fsEnd },
+      { name: "2nd", start_date: ssStart, end_date: ssEnd }
+    ];
+    if (summer_start && summer_end) {
+      const suStart = new Date(summer_start);
+      const suEnd = new Date(summer_end);
+      if (isNaN(suStart.getTime()) || isNaN(suEnd.getTime()) || suStart > suEnd) {
+        return res.status(400).json({ status: 400, message: "Invalid summer semester dates" });
+      }
+      semesters.push({ name: "summer", start_date: suStart, end_date: suEnd });
     }
 
-    // Check if configuration with same school year and semester already exists
-    const existingConfig = await SystemConfig.findOne({
-      school_year,
-      semester
-    });
+    const existingConfig = await AcademicConfig.findOne({ school_year });
 
     if (existingConfig) {
       return res.status(400).json({
         status: 400,
-        message: "Configuration for this school year and semester already exists",
+      message: "Configuration for this school year already exists",
       });
     }
 
-    const config = new SystemConfig({
-      default_hours,
+    const config = new AcademicConfig({
       school_year,
-      semester,
+      semesters,
       notes: notes?.trim() || null,
       is_active: make_active,
-      created_by: req.user._id,
+      created_by: req.user._id
     });
 
     await config.save();
+    const current = config.computeActiveSemester();
+    if (config.active_semester !== current) {
+      config.active_semester = current;
+      await config.save();
+    }
 
     // Populate fields for response
     await config.populate([
@@ -186,7 +197,7 @@ router.post("/", requireSuperAdmin, async (req, res) => {
 
     res.status(201).json({
       status: 201,
-      message: "System configuration created successfully",
+      message: "Academic configuration created successfully",
       data: config,
     });
   } catch (error) {
@@ -203,27 +214,15 @@ router.post("/", requireSuperAdmin, async (req, res) => {
 router.put("/:id", requireSuperAdmin, async (req, res) => {
   try {
     const { id } = req.params;
-    const { 
-      default_hours, 
-      school_year, 
-      semester, 
-      notes 
-    } = req.body;
+    const { school_year, notes } = req.body;
+    const { first_semester_start, first_semester_end, second_semester_start, second_semester_end, summer_start, summer_end } = req.body;
 
-    const config = await SystemConfig.findById(id);
+    const config = await AcademicConfig.findById(id);
 
     if (!config) {
       return res.status(404).json({
         status: 404,
-        message: "System configuration not found",
-      });
-    }
-
-    // Validate default_hours if provided
-    if (default_hours && (default_hours < 1 || default_hours > 24)) {
-      return res.status(400).json({
-        status: 400,
-        message: "Default hours must be between 1 and 24",
+      message: "Academic configuration not found",
       });
     }
 
@@ -234,42 +233,46 @@ router.put("/:id", requireSuperAdmin, async (req, res) => {
         message: "School year must be in format 'YYYY-YYYY' (e.g., '2024-2025')",
       });
     }
+    const updates = {};
+    if (school_year) updates.school_year = school_year;
+    if (notes !== undefined) updates.notes = notes?.trim() || null;
 
-    // Validate semester if provided
-    if (semester && !["1st", "2nd", "summer"].includes(semester)) {
-      return res.status(400).json({
-        status: 400,
-        message: "Semester must be '1st', '2nd', or 'summer'",
-      });
-    }
+    const semesterUpdates = [];
+    if (first_semester_start && first_semester_end)
+      semesterUpdates.push({ name: "1st", start_date: new Date(first_semester_start), end_date: new Date(first_semester_end) });
+    if (second_semester_start && second_semester_end)
+      semesterUpdates.push({ name: "2nd", start_date: new Date(second_semester_start), end_date: new Date(second_semester_end) });
+    if (summer_start && summer_end)
+      semesterUpdates.push({ name: "summer", start_date: new Date(summer_start), end_date: new Date(summer_end) });
 
-    // Check for duplicate school year and semester combination
-    if (school_year || semester) {
-      const targetSchoolYear = school_year || config.school_year;
-      const targetSemester = semester || config.semester;
-      
-      const existingConfig = await SystemConfig.findOne({
-        school_year: targetSchoolYear,
-        semester: targetSemester,
-        _id: { $ne: id }
-      });
-
-      if (existingConfig) {
-        return res.status(400).json({
-          status: 400,
-          message: "Configuration for this school year and semester already exists",
-        });
+    if (semesterUpdates.length > 0) {
+      const names = new Set();
+      for (const s of semesterUpdates) {
+        if (isNaN(new Date(s.start_date).getTime()) || isNaN(new Date(s.end_date).getTime())) {
+          return res.status(400).json({ status: 400, message: "Invalid semester dates" });
+        }
+        if (new Date(s.start_date) > new Date(s.end_date)) {
+          return res.status(400).json({ status: 400, message: "Semester start date must be before end date" });
+        }
+        if (names.has(s.name)) {
+          return res.status(400).json({ status: 400, message: "Duplicate semester name in updates" });
+        }
+        names.add(s.name);
       }
+      const existing = config.semesters.filter(s => !names.has(s.name));
+      config.semesters = [...existing, ...semesterUpdates];
     }
 
-    // Update fields
-    if (default_hours) config.default_hours = default_hours;
-    if (school_year) config.school_year = school_year;
-    if (semester) config.semester = semester;
-    if (notes !== undefined) config.notes = notes?.trim() || null;
+    Object.assign(config, updates);
     config.last_modified_by = req.user._id;
 
     await config.save();
+
+    const current = config.computeActiveSemester();
+    if (config.active_semester !== current) {
+      config.active_semester = current;
+      await config.save();
+    }
 
     // Populate fields for response
     await config.populate([
@@ -279,7 +282,7 @@ router.put("/:id", requireSuperAdmin, async (req, res) => {
 
     res.status(200).json({
       status: 200,
-      message: "System configuration updated successfully",
+      message: "Academic configuration updated successfully",
       data: config,
     });
   } catch (error) {
@@ -297,12 +300,12 @@ router.patch("/:id/activate", requireSuperAdmin, async (req, res) => {
   try {
     const { id } = req.params;
 
-    const config = await SystemConfig.findById(id);
+    const config = await AcademicConfig.findById(id);
 
     if (!config) {
       return res.status(404).json({
         status: 404,
-        message: "System configuration not found",
+      message: "Academic configuration not found",
       });
     }
 
@@ -314,11 +317,11 @@ router.patch("/:id/activate", requireSuperAdmin, async (req, res) => {
     }
 
     // Use the static method to safely activate configuration
-    const activeConfig = await SystemConfig.setActiveConfig(id, req.user._id);
+    const activeConfig = await AcademicConfig.setActiveConfig(id, req.user._id);
 
     res.status(200).json({
       status: 200,
-      message: "System configuration activated successfully",
+      message: "Academic configuration activated successfully",
       data: activeConfig,
     });
   } catch (error) {
@@ -336,12 +339,12 @@ router.delete("/:id", requireSuperAdmin, async (req, res) => {
   try {
     const { id } = req.params;
 
-    const config = await SystemConfig.findById(id);
+    const config = await AcademicConfig.findById(id);
 
     if (!config) {
       return res.status(404).json({
         status: 404,
-        message: "System configuration not found",
+      message: "Academic configuration not found",
       });
     }
 
@@ -349,15 +352,15 @@ router.delete("/:id", requireSuperAdmin, async (req, res) => {
     if (config.is_active) {
       return res.status(400).json({
         status: 400,
-        message: "Cannot delete active configuration. Please activate another configuration first.",
+      message: "Cannot delete active configuration. Please activate another configuration first.",
       });
     }
 
-    await SystemConfig.findByIdAndDelete(id);
+    await AcademicConfig.findByIdAndDelete(id);
 
     res.status(200).json({
       status: 200,
-      message: "System configuration deleted successfully",
+      message: "Academic configuration deleted successfully",
     });
   } catch (error) {
     console.error("Delete config error:", error);
@@ -374,7 +377,7 @@ router.get("/history/all", adminAuthMiddleware, async (req, res) => {
   try {
     const { limit = 20 } = req.query;
 
-    const history = await SystemConfig.find({})
+    const history = await AcademicConfig.find({})
       .populate('created_by', 'firstname lastname username')
       .populate('last_modified_by', 'firstname lastname username')
       .sort({ createdAt: -1 })
@@ -382,7 +385,7 @@ router.get("/history/all", adminAuthMiddleware, async (req, res) => {
 
     res.status(200).json({
       status: 200,
-      message: "System configuration history retrieved successfully",
+      message: "Academic configuration history retrieved successfully",
       data: {
         configurations: history,
         total_shown: history.length,
