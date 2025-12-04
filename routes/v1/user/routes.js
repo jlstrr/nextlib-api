@@ -23,7 +23,7 @@ router.get(
       res.status(200).json({ 
         status: 200, 
         message: "User profile retrieved successfully", 
-        user: {
+        data: {
           id: user._id,
           id_number: user.id_number,
           firstname: user.firstname,
