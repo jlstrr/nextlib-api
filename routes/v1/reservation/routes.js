@@ -5,7 +5,10 @@ import User from "../../../models/User.js";
 import Admin from "../../../models/Admin.js";
 import Computer from "../../../models/Computer.js";
 import Laboratory from "../../../models/Laboratory.js";
+
 import { adminAuthMiddleware, authMiddleware } from "../../../middleware/auth.js";
+import sendMail from "../../../utils/mailer.js";
+import SubjectScheduler from "../../../models/SubjectScheduler.js";
 
 const router = Router();
 
@@ -96,7 +99,7 @@ const generateReservationNumber = async () => {
 };
 
 // Check for reservation conflicts
-const checkReservationConflicts = async (reservationDate, startTime, duration, reservationType, excludeReservationId = null) => {
+const checkReservationConflicts = async (reservationDate, startTime, duration, reservationType, excludeReservationId = null, laboratoryId = null, computerId = null) => {
   const requestedDate = new Date(reservationDate);
   
   // Calculate requested time range in minutes
@@ -135,6 +138,13 @@ const checkReservationConflicts = async (reservationDate, startTime, duration, r
   if (excludeReservationId) {
     conflictQuery._id = { $ne: excludeReservationId };
   }
+  // Add laboratory or computer filter if provided
+  if (reservationType === 'laboratory' && laboratoryId) {
+    conflictQuery.laboratory_id = laboratoryId;
+  }
+  if (reservationType === 'computer' && computerId) {
+    conflictQuery.computer_id = computerId;
+  }
   
   const existingReservations = await Reservation.find(conflictQuery)
     .populate('user_id', 'firstname lastname email id_number')
@@ -161,7 +171,47 @@ const checkReservationConflicts = async (reservationDate, startTime, duration, r
     return (requestedStartMinutes < existingEndMinutes) && (existingStartMinutes < requestedEndMinutes);
   });
   
-  return conflictingReservations;
+  // Check for subject schedule conflicts (for laboratory or computer)
+  let subjectConflicts = [];
+  if (reservationType === 'laboratory' && laboratoryId) {
+    subjectConflicts = await SubjectScheduler.find({
+      laboratory_id: laboratoryId,
+      isDeleted: false,
+      $expr: {
+        $and: [
+          { $eq: [{ $year: '$date' }, { $year: requestedDate }] },
+          { $eq: [{ $month: '$date' }, { $month: requestedDate }] },
+          { $eq: [{ $dayOfMonth: '$date' }, { $dayOfMonth: requestedDate }] }
+        ]
+      }
+    });
+  } else if (reservationType === 'computer' && computerId) {
+    subjectConflicts = await SubjectScheduler.find({
+      computer_id: computerId,
+      isDeleted: false,
+      $expr: {
+        $and: [
+          { $eq: [{ $year: '$date' }, { $year: requestedDate }] },
+          { $eq: [{ $month: '$date' }, { $month: requestedDate }] },
+          { $eq: [{ $dayOfMonth: '$date' }, { $dayOfMonth: requestedDate }] }
+        ]
+      }
+    });
+  }
+
+  // Filter subject conflicts by time overlap
+  const overlappingSubjects = subjectConflicts.filter(subject => {
+    let subjectStartMinutes, subjectEndMinutes;
+    if (subject.start_time && subject.end_time) {
+      subjectStartMinutes = timeToMinutes(subject.start_time);
+      subjectEndMinutes = timeToMinutes(subject.end_time);
+      return (requestedStartMinutes < subjectEndMinutes) && (subjectStartMinutes < requestedEndMinutes);
+    }
+    return false;
+  });
+
+  // Return both reservation and subject conflicts
+  return { reservationConflicts: conflictingReservations, subjectConflicts: overlappingSubjects };
 };
 
 // ==========================
@@ -616,26 +666,39 @@ router.post("/", authMiddleware, async (req, res) => {
       });
     }
 
-    // Check for conflicts for laboratory reservations when user is faculty
-    let conflictingReservations = [];
-    if (reservation_type === "laboratory" && req.user.user_type === "faculty") {
-      conflictingReservations = await checkReservationConflicts(
+
+    // Check for conflicts for laboratory or computer reservations
+    let conflictResult = { reservationConflicts: [], subjectConflicts: [] };
+    if ((reservation_type === "laboratory" && laboratory_id) || (reservation_type === "computer" && computer_id)) {
+      conflictResult = await checkReservationConflicts(
         calculatedDate,
-        calculatedStartTime, 
-        calculatedDuration, 
-        reservation_type
+        calculatedStartTime,
+        calculatedDuration,
+        reservation_type,
+        null,
+        reservation_type === "laboratory" ? laboratory_id : null,
+        reservation_type === "computer" ? computer_id : null
       );
-      
-      if (conflictingReservations.length > 0) {
+      if (conflictResult.reservationConflicts.length > 0 || conflictResult.subjectConflicts.length > 0) {
         return res.status(409).json({
           status: 409,
-          message: "Reservation conflict detected",
-          conflicts: conflictingReservations.map(conflict => ({
+          message: conflictResult.reservationConflicts.length > 0
+            ? "Reservation conflict detected"
+            : "Subject schedule conflict detected",
+          reservation_conflicts: conflictResult.reservationConflicts.map(conflict => ({
             reservation_number: conflict.reservation_number,
             user: `${conflict.user_id.firstname} ${conflict.user_id.lastname}`,
             reservation_date: conflict.reservation_date,
             duration: conflict.duration,
             status: conflict.status
+          })),
+          subject_conflicts: conflictResult.subjectConflicts.map(subject => ({
+            subject_code: subject.subject_code,
+            subject_name: subject.subject_name,
+            instructor: subject.instructor_name,
+            date: subject.date,
+            start_time: subject.start_time,
+            end_time: subject.end_time
           }))
         });
       }
@@ -658,11 +721,9 @@ router.post("/", authMiddleware, async (req, res) => {
       reservationStatus = "approved";
         // Send email notification to faculty about auto-approval
         try {
-          const mailer = require("../../../utils/mailer.js");
-          await mailer.sendMail({
-            to: req.user.email,
-            subject: "Laboratory Reservation Auto-Approved",
-            html: `<p>Dear ${req.user.firstname} ${req.user.lastname},</p>
+          const email = req.user.email;
+          const subject = "Laboratory Reservation Auto-Approved";
+          const html = `<p>Dear ${req.user.firstname} ${req.user.lastname},</p>
               <p>Your laboratory reservation has been <b>auto-approved</b>.</p>
               <ul>
                 <li><b>Reservation Number:</b> ${reservationNumber}</li>
@@ -673,8 +734,11 @@ router.post("/", authMiddleware, async (req, res) => {
                 <li><b>Duration:</b> ${calculatedDuration} minutes</li>
                 <li><b>Purpose:</b> ${purpose.trim()}</li>
               </ul>
-              <p>If you have any questions, please contact the admin.</p>`
-          });
+              <p>If you have any questions, please contact the admin.</p>
+            `;
+              
+          await sendMail(email, subject, html);
+
         } catch (mailError) {
           console.error("Failed to send auto-approval email to faculty:", mailError);
         }
@@ -898,17 +962,49 @@ router.patch("/:id/approve", adminAuthMiddleware, async (req, res) => {
     reservation.approved_by = req.user._id;
     if (notes) reservation.notes = notes.trim();
 
+
     await reservation.save();
 
-    // Get user and update their data
+    // Fetch user and related data for email
     const user = await User.findById(reservation.user_id);
+    let laboratory = null;
+    let computer = null;
+    if (reservation.laboratory_id) {
+      laboratory = await Laboratory.findById(reservation.laboratory_id);
+    }
+    if (reservation.computer_id) {
+      computer = await Computer.findById(reservation.computer_id).populate('laboratory_id', 'name');
+    }
+
+    try {
+      const email = user?.email;
+      const subject = `${reservation.reservation_type === 'laboratory' ? 'Laboratory' : 'Computer'} Reservation Approved`;
+      const html = `<p>Dear ${user?.firstname || ''} ${user?.lastname || ''},</p>
+          <p>Your ${reservation.reservation_type === 'laboratory' ? 'laboratory' : 'computer'} reservation has been <b>approved</b>.</p>
+          <ul>
+            <li><b>Reservation Number:</b> ${reservation.reservation_number}</li>
+            <li><b>Laboratory:</b> ${laboratory?.name || computer?.laboratory_id?.name || 'N/A'}</li>
+            <li><b>Date:</b> ${reservation.reservation_date ? new Date(reservation.reservation_date).toLocaleDateString() : 'N/A'}</li>
+            <li><b>Start Time:</b> ${reservation.start_time || 'N/A'}</li>
+            <li><b>End Time:</b> ${reservation.end_time || 'N/A'}</li>
+            <li><b>Duration:</b> ${reservation.duration ? reservation.duration + ' minutes' : 'N/A'}</li>
+            <li><b>Purpose:</b> ${reservation.purpose || ''}</li>
+          </ul>
+          <p>If you have any questions, please contact the admin.</p>
+        `;
+      if (email) {
+        await sendMail(email, subject, html);
+      }
+    } catch (mailError) {
+      console.error("Failed to send approval email to reservation owner:", mailError);
+    }
+
+    // Update user's approved reservations count
     if (user) {
-      // Example: If you want to track approved reservations count
       if (!user.approved_reservations_count) {
         user.approved_reservations_count = 0;
       }
       user.approved_reservations_count += 1;
-      
       await user.save();
     }
 
@@ -1400,22 +1496,28 @@ router.post("/check-conflicts", authMiddleware, async (req, res) => {
       });
     }
 
-    // Check for conflicts
-    const conflictingReservations = await checkReservationConflicts(
-      new Date(reservation_date),
-      calculatedStartTime, 
-      calculatedDuration, 
-      reservation_type,
-      exclude_reservation_id
-    );
+    // Check for conflicts (including subject schedule)
+    let conflictResult = { reservationConflicts: [], subjectConflicts: [] };
+    if ((reservation_type === "laboratory" && req.body.laboratory_id) || (reservation_type === "computer" && req.body.computer_id)) {
+      conflictResult = await checkReservationConflicts(
+        new Date(reservation_date),
+        calculatedStartTime,
+        calculatedDuration,
+        reservation_type,
+        exclude_reservation_id,
+        reservation_type === "laboratory" ? req.body.laboratory_id : null,
+        reservation_type === "computer" ? req.body.computer_id : null
+      );
+    }
 
-    const hasConflicts = conflictingReservations.length > 0;
+    const hasReservationConflicts = conflictResult.reservationConflicts.length > 0;
+    const hasSubjectConflicts = conflictResult.subjectConflicts.length > 0;
 
     res.status(200).json({
       status: 200,
-      message: hasConflicts ? "Conflicts detected" : "No conflicts found",
-      has_conflicts: hasConflicts,
-      conflicts: hasConflicts ? conflictingReservations.map(conflict => ({
+      message: hasReservationConflicts || hasSubjectConflicts ? "Conflicts detected" : "No conflicts found",
+      has_conflicts: hasReservationConflicts || hasSubjectConflicts,
+      reservation_conflicts: hasReservationConflicts ? conflictResult.reservationConflicts.map(conflict => ({
         reservation_number: conflict.reservation_number,
         user: `${conflict.user_id.firstname} ${conflict.user_id.lastname}`,
         user_id: conflict.user_id._id,
@@ -1426,6 +1528,14 @@ router.post("/check-conflicts", authMiddleware, async (req, res) => {
           minutesToTime(timeToMinutes(conflict.start_time || '00:00') + conflict.duration) : null),
         duration: conflict.duration,
         status: conflict.status
+      })) : [],
+      subject_conflicts: hasSubjectConflicts ? conflictResult.subjectConflicts.map(subject => ({
+        subject_code: subject.subject_code,
+        subject_name: subject.subject_name,
+        instructor: subject.instructor_name,
+        date: subject.date,
+        start_time: subject.start_time,
+        end_time: subject.end_time
       })) : []
     });
   } catch (error) {

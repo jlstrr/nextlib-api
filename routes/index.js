@@ -10,6 +10,8 @@ import logsV1 from "./v1/logs/routes.js";
 import systemConfigV1 from "./v1/system-config/routes.js";
 import attendanceLogsV1 from "./v1/attendance-logs/routes.js";
 import courseV1 from "./v1/course/routes.js";
+import systemDefaultsV1 from "./v1/system-defaults/routes.js";
+import subjectSchedulerV1 from "./v1/subject-scheduler/routes.js";
 
 const router = Router();
 
@@ -23,7 +25,9 @@ router.use("/v1/reservations", reservationV1);
 router.use("/v1/usage-history", usageHistoryV1);
 router.use("/v1/logs", logsV1);
 router.use("/v1/system-config", systemConfigV1);
+router.use("/v1/system-defaults", systemDefaultsV1);
 router.use("/v1/attendance-logs", attendanceLogsV1);
 router.use("/v1/courses", courseV1);
+router.use("/v1/subject-scheduler", subjectSchedulerV1);
 
 export default router;

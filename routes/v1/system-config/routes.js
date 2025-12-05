@@ -119,7 +119,7 @@ router.get("/:id", adminAuthMiddleware, async (req, res) => {
 });
 
 // Create new system configuration (SuperAdmin only)
-router.post("/", requireSuperAdmin, async (req, res) => {
+router.post("/", authMiddleware, async (req, res) => {
   try {
     const { school_year, notes, make_active = false } = req.body;
     const { first_semester_start, first_semester_end, second_semester_start, second_semester_end, summer_start, summer_end } = req.body;
@@ -211,7 +211,7 @@ router.post("/", requireSuperAdmin, async (req, res) => {
 });
 
 // Update system configuration (SuperAdmin only)
-router.put("/:id", requireSuperAdmin, async (req, res) => {
+router.put("/:id", authMiddleware, async (req, res) => {
   try {
     const { id } = req.params;
     const { school_year, notes } = req.body;
@@ -296,7 +296,7 @@ router.put("/:id", requireSuperAdmin, async (req, res) => {
 });
 
 // Activate system configuration (SuperAdmin only)
-router.patch("/:id/activate", requireSuperAdmin, async (req, res) => {
+router.patch("/:id/activate", authMiddleware, async (req, res) => {
   try {
     const { id } = req.params;
 

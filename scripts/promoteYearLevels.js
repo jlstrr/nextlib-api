@@ -13,24 +13,25 @@ if (!url) {
 const run = async () => {
   try {
     await mongoose.connect(url);
-    const result = await AcademicConfig.updateActiveSemesterForActiveConfig();
+    const result = await AcademicConfig.promoteStudentYearLevelsIfYearEnded();
+    let payload;
     if (!result) {
-      console.log("No active academic config found");
+      payload = { promoted: false, reason: "no_active_config", updated_at: new Date().toISOString() };
     } else {
       const cfg = result.config ?? result;
-      const payload = {
+      payload = {
         school_year: cfg.school_year,
-        active_semester: cfg.active_semester,
-        semester_changed: !!result.semester_changed,
-        reset_summary: result.reset || null,
+        promoted: !!result.promoted,
+        reason: result.reason || null,
+        counts: result.counts || null,
         updated_at: new Date().toISOString(),
       };
-      console.log(JSON.stringify(payload, null, 2));
     }
+    console.log(JSON.stringify(payload, null, 2));
     await mongoose.disconnect();
     process.exit(0);
   } catch (err) {
-    console.error("updateActiveSemester failed:", err?.message || err);
+    console.error("promoteYearLevels failed:", err?.message || err);
     try { await mongoose.disconnect(); } catch {}
     process.exit(1);
   }
