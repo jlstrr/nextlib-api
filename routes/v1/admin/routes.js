@@ -90,6 +90,34 @@ router.get("/profile", adminAuthMiddleware, async (req, res) => {
   }
 });
 
+router.post("/change-password", authMiddleware, async (req, res) => {
+  try {
+    const { new_password, confirm_password } = req.body;
+
+    if (!new_password || !confirm_password) {
+      return res.status(400).json({ message: "new_password and confirm_password are required" });
+    }
+
+    if (new_password !== confirm_password) {
+      return res.status(400).json({ message: "New password and confirmation do not match" });
+    }
+
+    if (new_password.length < 8) {
+      return res.status(400).json({ message: "New password must be at least 8 characters" });
+    }
+
+    const admin = await Admin.findById(req.user._id);
+    if (!admin) return res.status(404).json({ message: "Admin not found" });
+
+    admin.password = new_password;
+    await admin.save();
+
+    res.status(200).json({ status: 200, message: "Password changed successfully" });
+  } catch (err) {
+    res.status(500).json({ error: err.message });
+  }
+});
+
 // Logout
 router.post("/logout", adminAuthMiddleware, (req, res) => {
   const userId = req.userId;
@@ -374,7 +402,7 @@ router.get("/:id", authMiddleware, async (req, res) => {
 });
 
 // Update Admin
-router.put("/:id", requireSuperAdmin, async (req, res) => {
+router.put("/:id", authMiddleware, async (req, res) => {
   try {
     const updates = req.body;
     const admin = await Admin.findByIdAndUpdate(req.params.id, updates, { new: true }).select("-password");

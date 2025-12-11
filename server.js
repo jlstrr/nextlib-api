@@ -33,7 +33,8 @@ const defaultOrigins = [
   'https://www.nextlib-system.online',
   'http://localhost:5173',
   'http://localhost:5174',
-  'http://192.168.100.46:5173'
+  'http://192.168.100.46:5173',
+  'https://nextlib-desktop-admin.vercel.app',
 ];
 
 const allowedOrigins = process.env.FRONTEND_URL

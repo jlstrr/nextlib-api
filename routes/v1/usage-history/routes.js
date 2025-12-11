@@ -494,26 +494,28 @@ router.get("/statistics/overview", adminAuthMiddleware, async (req, res) => {
 router.get("/reports/:type", authMiddleware, async (req, res) => {
   try {
     const { type } = req.params;
-    const { user_id, user_type, program, date_from, date_to } = req.query;
+    const { user_type, program_course, date_from, date_to } = req.query;
 
-
-    // Build filter
-    const matchFilter = { isDeleted: false };
-    if (user_id) matchFilter.user_id = user_id;
-    if (user_type) matchFilter.user_type = user_type;
-    if (program) matchFilter.program_course = program;
+    const dateMatch = { isDeleted: false };
     if (date_from || date_to) {
-      matchFilter.date = {};
-      if (date_from) matchFilter.date.$gte = new Date(date_from);
-      if (date_to) matchFilter.date.$lte = new Date(date_to);
+      dateMatch.date = {};
+      if (date_from) dateMatch.date.$gte = new Date(date_from);
+      if (date_to) dateMatch.date.$lte = new Date(date_to);
     }
+
+    const userMatch = {};
+    const programParam = program_course || req.query.program || null;
+    if (user_type) userMatch["user.user_type"] = user_type;
+    if (programParam) userMatch["user.program_course"] = programParam;
 
     let report = [];
     let columns = [];
     if (type === 'daily') {
-      // Group by day, then list users for each day
       const days = await UsageHistory.aggregate([
-        { $match: matchFilter },
+        { $match: dateMatch },
+        { $lookup: { from: 'users', localField: 'user_id', foreignField: '_id', as: 'user' } },
+        { $unwind: '$user' },
+        Object.keys(userMatch).length ? { $match: userMatch } : { $match: {} },
         {
           $group: {
             _id: {
@@ -523,7 +525,12 @@ router.get("/reports/:type", authMiddleware, async (req, res) => {
               user_id: "$user_id"
             },
             usage_count: { $sum: 1 },
-            total_usage_time: { $sum: "$duration" }
+            total_usage_time: { $sum: "$duration" },
+            firstname: { $first: "$user.firstname" },
+            lastname: { $first: "$user.lastname" },
+            id_number: { $first: "$user.id_number" },
+            user_type: { $first: "$user.user_type" },
+            program_course: { $first: "$user.program_course" }
           }
         },
         { $sort: { "_id.year": -1, "_id.month": -1, "_id.day": -1 } },
@@ -533,6 +540,11 @@ router.get("/reports/:type", authMiddleware, async (req, res) => {
             users: {
               $push: {
                 user_id: "$_id.user_id",
+                firstname: "$firstname",
+                lastname: "$lastname",
+                id_number: "$id_number",
+                user_type: "$user_type",
+                program_course: "$program_course",
                 usage_count: "$usage_count",
                 total_usage_time: "$total_usage_time"
               }
@@ -541,30 +553,24 @@ router.get("/reports/:type", authMiddleware, async (req, res) => {
         },
         { $sort: { "_id.year": -1, "_id.month": -1, "_id.day": -1 } }
       ]);
-      // Populate user details
-      report = [];
-      for (const d of days) {
-        const populatedUsers = await User.find({ _id: { $in: d.users.map(u => u.user_id) } })
-          .select('firstname lastname id_number user_type program_course');
-        const userMap = {};
-        populatedUsers.forEach(u => { userMap[u._id.toString()] = u; });
-        report.push({
-          date: `${d._id.year}-${String(d._id.month).padStart(2, '0')}-${String(d._id.day).padStart(2, '0')}`,
-          users: d.users.map(u => ({
-            name: userMap[u.user_id.toString()] ? `${userMap[u.user_id.toString()].firstname} ${userMap[u.user_id.toString()].lastname}` : '',
-            id_number: userMap[u.user_id.toString()]?.id_number || '',
-            user_type: userMap[u.user_id.toString()]?.user_type || '',
-            program_course: userMap[u.user_id.toString()]?.program_course || '',
-            usage_count: u.usage_count,
-            total_usage_time: u.total_usage_time
-          }))
-        });
-      }
+      report = days.map(d => ({
+        date: `${d._id.year}-${String(d._id.month).padStart(2, '0')}-${String(d._id.day).padStart(2, '0')}`,
+        users: d.users.map(u => ({
+          name: `${u.firstname || ''}${u.firstname || u.lastname ? ' ' : ''}${u.lastname || ''}`.trim(),
+          id_number: u.id_number || '',
+          user_type: u.user_type || '',
+          program_course: u.program_course || '',
+          usage_count: u.usage_count,
+          total_usage_time: u.total_usage_time
+        }))
+      }));
       columns = ["Date", "Name", "ID Number", "User Type", "Program/Course", "Usage Count", "Total Usage Time (min)"];
     } else if (type === 'weekly') {
-      // Group by week, then list users for each week
       const weeks = await UsageHistory.aggregate([
-        { $match: matchFilter },
+        { $match: dateMatch },
+        { $lookup: { from: 'users', localField: 'user_id', foreignField: '_id', as: 'user' } },
+        { $unwind: '$user' },
+        Object.keys(userMatch).length ? { $match: userMatch } : { $match: {} },
         {
           $group: {
             _id: {
@@ -573,7 +579,12 @@ router.get("/reports/:type", authMiddleware, async (req, res) => {
               user_id: "$user_id"
             },
             usage_count: { $sum: 1 },
-            total_usage_time: { $sum: "$duration" }
+            total_usage_time: { $sum: "$duration" },
+            firstname: { $first: "$user.firstname" },
+            lastname: { $first: "$user.lastname" },
+            id_number: { $first: "$user.id_number" },
+            user_type: { $first: "$user.user_type" },
+            program_course: { $first: "$user.program_course" }
           }
         },
         { $sort: { "_id.year": -1, "_id.week": -1 } },
@@ -583,6 +594,11 @@ router.get("/reports/:type", authMiddleware, async (req, res) => {
             users: {
               $push: {
                 user_id: "$_id.user_id",
+                firstname: "$firstname",
+                lastname: "$lastname",
+                id_number: "$id_number",
+                user_type: "$user_type",
+                program_course: "$program_course",
                 usage_count: "$usage_count",
                 total_usage_time: "$total_usage_time"
               }
@@ -591,31 +607,25 @@ router.get("/reports/:type", authMiddleware, async (req, res) => {
         },
         { $sort: { "_id.year": -1, "_id.week": -1 } }
       ]);
-      // Populate user details
-      report = [];
-      for (const w of weeks) {
-        const populatedUsers = await User.find({ _id: { $in: w.users.map(u => u.user_id) } })
-          .select('firstname lastname id_number user_type program_course');
-        const userMap = {};
-        populatedUsers.forEach(u => { userMap[u._id.toString()] = u; });
-        report.push({
-          year: w._id.year,
-          week: w._id.week,
-          users: w.users.map(u => ({
-            name: userMap[u.user_id.toString()] ? `${userMap[u.user_id.toString()].firstname} ${userMap[u.user_id.toString()].lastname}` : '',
-            id_number: userMap[u.user_id.toString()]?.id_number || '',
-            user_type: userMap[u.user_id.toString()]?.user_type || '',
-            program_course: userMap[u.user_id.toString()]?.program_course || '',
-            usage_count: u.usage_count,
-            total_usage_time: u.total_usage_time
-          }))
-        });
-      }
+      report = weeks.map(w => ({
+        year: w._id.year,
+        week: w._id.week,
+        users: w.users.map(u => ({
+          name: `${u.firstname || ''}${u.firstname || u.lastname ? ' ' : ''}${u.lastname || ''}`.trim(),
+          id_number: u.id_number || '',
+          user_type: u.user_type || '',
+          program_course: u.program_course || '',
+          usage_count: u.usage_count,
+          total_usage_time: u.total_usage_time
+        }))
+      }));
       columns = ["Year", "Week", "Name", "ID Number", "User Type", "Program/Course", "Usage Count", "Total Usage Time (min)"];
     } else if (type === 'monthly') {
-      // Group by month
       const monthly = await UsageHistory.aggregate([
-        { $match: matchFilter },
+        { $match: dateMatch },
+        { $lookup: { from: 'users', localField: 'user_id', foreignField: '_id', as: 'user' } },
+        { $unwind: '$user' },
+        Object.keys(userMatch).length ? { $match: userMatch } : { $match: {} },
         {
           $group: {
             _id: {
@@ -627,12 +637,12 @@ router.get("/reports/:type", authMiddleware, async (req, res) => {
             unique_users: { $addToSet: "$user_id" },
             students: {
               $addToSet: {
-                $cond: [ { $eq: [ "$user_type", "student" ] }, "$user_id", null ]
+                $cond: [ { $eq: [ "$user.user_type", "student" ] }, "$user_id", null ]
               }
             },
             faculty_staff: {
               $addToSet: {
-                $cond: [ { $eq: [ "$user_type", "faculty" ] }, "$user_id", null ]
+                $cond: [ { $eq: [ "$user.user_type", "faculty" ] }, "$user_id", null ]
               }
             }
           }
@@ -644,15 +654,18 @@ router.get("/reports/:type", authMiddleware, async (req, res) => {
       report = [];
       for (const m of monthly) {
         // Find all days in this month
+        const monthDateMatch = {
+          ...dateMatch,
+          date: {
+            $gte: new Date(m._id.year, m._id.month - 1, 1),
+            $lt: new Date(m._id.year, m._id.month, 1)
+          }
+        };
         const days = await UsageHistory.aggregate([
-          { $match: {
-              ...matchFilter,
-              date: {
-                $gte: new Date(m._id.year, m._id.month - 1, 1),
-                $lt: new Date(m._id.year, m._id.month, 1)
-              }
-            }
-          },
+          { $match: monthDateMatch },
+          { $lookup: { from: 'users', localField: 'user_id', foreignField: '_id', as: 'user' } },
+          { $unwind: '$user' },
+          Object.keys(userMatch).length ? { $match: userMatch } : { $match: {} },
           {
             $group: {
               _id: { day: { $dayOfMonth: "$date" } },
@@ -688,7 +701,7 @@ router.get("/reports/:type", authMiddleware, async (req, res) => {
     res.status(200).json({
       status: 200,
       message: `${type.charAt(0).toUpperCase() + type.slice(1)} usage report retrieved successfully`,
-      filters_used: { user_id, user_type, program, date_from, date_to },
+      filters_used: { user_type, program_course: programParam, date_from, date_to },
       columns,
       data: report
     });
