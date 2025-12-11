@@ -129,9 +129,20 @@ router.get("/dashboard", authMiddleware, async (req, res) => {
     let allottedHoursData = null;
     
     if (req.user.user_type === "student") {
+      // Helper to convert HH:MM:SS to compact format (e.g., 7h5m)
+      function toCompactTime(timeString) {
+        if (!timeString) return "0m";
+        const [h, m, s] = timeString.split(":").map(Number);
+        let result = '';
+        if (h > 0) result += `${h}h`;
+        if (m > 0) result += `${m}m`;
+        if (h === 0 && m === 0) result = `${s}s`;
+        return result || '0m';
+      }
+
       // Parse remaining_time to get allotted time info
       const remainingTimeMinutes = parseTimeToMinutes(req.user.remaining_time);
-      const remainingTimeHours = Math.round(remainingTimeMinutes / 60 * 100) / 100; // Round to 2 decimal places
+      const remainingTimeHours = Math.round(remainingTimeMinutes / 60 * 100) / 100; // still used for calculations
 
       // Calculate used time today from usage history
       const todayUsage = await UsageHistory.aggregate([
@@ -196,7 +207,7 @@ router.get("/dashboard", authMiddleware, async (req, res) => {
 
       allottedHoursData = {
         average_hours_per_day: averageHoursPerDay,
-        remaining_hours_left: remainingTimeHours,
+        remaining_hours_left: toCompactTime(req.user.remaining_time),
         used_hours_today: usedTodayHours,
         total_allotted_time: req.user.remaining_time || "00:00:00"
       };

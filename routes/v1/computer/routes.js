@@ -1,7 +1,9 @@
 import { Router } from "express";
+import crypto from "crypto";
 import Computer from "../../../models/Computer.js";
 import Laboratory from "../../../models/Laboratory.js";
 import Reservation from "../../../models/Reservation.js";
+import SubjectScheduler from "../../../models/SubjectScheduler.js";
 import { adminAuthMiddleware, authMiddleware } from "../../../middleware/auth.js";
 
 const router = Router();
@@ -479,6 +481,15 @@ router.get("/availability/:computer_id", authMiddleware, async (req, res) => {
       status: { $in: ['pending', 'approved', 'active'] } // Include pending, approved and active reservations
     }).populate('user_id', 'firstname lastname email id_number');
 
+    // Get all subject scheduler entries for the same laboratory and day
+    const subjectSchedules = await SubjectScheduler.find({
+      date: {
+        $gte: startOfDay,
+        $lte: endOfDay
+      },
+      isDeleted: { $ne: true },
+    });
+
     // Combine all reservations for conflict checking
     const allReservations = [...computerReservations, ...laboratoryReservations];
 
@@ -494,8 +505,21 @@ router.get("/availability/:computer_id", authMiddleware, async (req, res) => {
 
     // Helper function to convert military time to minutes since midnight
     const timeToMinutes = (timeString) => {
-      const [hours, minutes] = timeString.split(':').map(Number);
+      if (!timeString) return 0;
+      const [hours, minutes] = timeString.split(":").map(Number);
       return hours * 60 + minutes;
+    };
+
+    // Helper to parse timeslot string (e.g. '08:00-10:00')
+    // Helper to parse timeslot string (e.g. '08:00-10:00' or '16:55 - 17:55')
+    const parseTimeslot = (timeslot) => {
+      if (!timeslot || typeof timeslot !== 'string') return [0, 0];
+      // Split on dash, allowing spaces around it
+      const parts = timeslot.split('-');
+      if (parts.length !== 2) return [0, 0];
+      const start = parts[0].trim();
+      const end = parts[1].trim();
+      return [timeToMinutes(start), timeToMinutes(end)];
     };
     
     // Generate basic time slots for the day (8:00 AM to 5:00 PM)
@@ -510,7 +534,7 @@ router.get("/availability/:computer_id", authMiddleware, async (req, res) => {
       if (slotEndMinutes > endMinutes) {
         break;
       }
-      
+
       const slotStartTime = minutesToTime(currentMinutes);
       const slotEndTime = minutesToTime(slotEndMinutes);
 
@@ -520,32 +544,35 @@ router.get("/availability/:computer_id", authMiddleware, async (req, res) => {
       const isPast = targetDate.toDateString() === new Date().toDateString() && currentMinutes < currentTimeMinutes;
 
       // Check for conflicts with existing reservations (both computer and laboratory)
-      const hasConflict = allReservations.some(reservation => {
+      const hasReservationConflict = allReservations.some(reservation => {
         let reservationStartMinutes, reservationEndMinutes;
-        
         if (reservation.start_time && typeof reservation.start_time === 'string') {
-          // New format with military time
           reservationStartMinutes = timeToMinutes(reservation.start_time);
           reservationEndMinutes = timeToMinutes(reservation.end_time);
         } else if (reservation.reservation_date && reservation.duration) {
-          // Legacy format
           const reservationStart = new Date(reservation.reservation_date);
           reservationStartMinutes = reservationStart.getHours() * 60 + reservationStart.getMinutes();
           reservationEndMinutes = reservationStartMinutes + reservation.duration;
         } else {
           return false; // Skip if we can't determine the time
         }
-        
         // Check for overlap: (start1 < end2) && (start2 < end1)
         return (currentMinutes < reservationEndMinutes) && (reservationStartMinutes < slotEndMinutes);
       });
 
+      // Check for conflicts with subject scheduler
+      const hasSubjectConflict = subjectSchedules.some(schedule => {
+        if (!schedule.timeslot) return false;
+        const [schedStart, schedEnd] = parseTimeslot(schedule.timeslot);
+        return (currentMinutes < schedEnd) && (schedStart < slotEndMinutes);
+      });
+
+      const hasConflict = hasReservationConflict || hasSubjectConflict;
       const isAvailable = !isPast && !hasConflict;
 
       // Get conflicting reservations for this slot (both computer and laboratory)
       const conflictingReservations = allReservations.filter(reservation => {
         let reservationStartMinutes, reservationEndMinutes;
-        
         if (reservation.start_time && typeof reservation.start_time === 'string') {
           reservationStartMinutes = timeToMinutes(reservation.start_time);
           reservationEndMinutes = timeToMinutes(reservation.end_time);
@@ -556,9 +583,28 @@ router.get("/availability/:computer_id", authMiddleware, async (req, res) => {
         } else {
           return false;
         }
-        
         return (currentMinutes < reservationEndMinutes) && (reservationStartMinutes < slotEndMinutes);
       });
+
+      // Add subject scheduler conflicts as pseudo-reservations
+      const conflictingSubjectSchedules = subjectSchedules.filter(schedule => {
+        if (!schedule.timeslot) return false;
+        const [schedStart, schedEnd] = parseTimeslot(schedule.timeslot);
+        return (currentMinutes < schedEnd) && (schedStart < slotEndMinutes);
+      });
+
+      // Map subject scheduler conflicts to a similar structure for UI
+      const subjectConflicts = conflictingSubjectSchedules.map(sched => ({
+        id: sched.id,
+        reservation_number: null,
+        reservation_type: 'subject_schedule',
+        user: sched.instructorName || 'Subject Instructor',
+        start_time: sched.timeslot ? sched.timeslot.split('-')[0] : '',
+        end_time: sched.timeslot ? sched.timeslot.split('-')[1] : '',
+        duration: sched.timeslot ? (parseTimeslot(sched.timeslot)[1] - parseTimeslot(sched.timeslot)[0]) : null,
+        status: 'scheduled',
+        purpose: sched.subjectName || 'Class Schedule'
+      }));
 
       timeSlots.push({
         start_time: slotStartTime,
@@ -567,17 +613,20 @@ router.get("/availability/:computer_id", authMiddleware, async (req, res) => {
         is_past: isPast,
         has_conflict: hasConflict,
         duration_minutes: durationMinutes,
-        conflicting_reservations: conflictingReservations.map(res => ({
-          id: res.id,
-          reservation_number: res.reservation_number,
-          reservation_type: res.reservation_type,
-          user: `${res.user_id.firstname} ${res.user_id.lastname}`,
-          start_time: res.start_time || minutesToTime(new Date(res.reservation_date).getHours() * 60 + new Date(res.reservation_date).getMinutes()),
-          end_time: res.end_time || minutesToTime((new Date(res.reservation_date).getHours() * 60 + new Date(res.reservation_date).getMinutes()) + res.duration),
-          duration: res.duration,
-          status: res.status,
-          purpose: res.purpose
-        }))
+        conflicting_reservations: [
+          ...conflictingReservations.map(res => ({
+            id: res.id,
+            reservation_number: res.reservation_number,
+            reservation_type: res.reservation_type,
+            user: `${res.user_id.firstname} ${res.user_id.lastname}`,
+            start_time: res.start_time || minutesToTime(new Date(res.reservation_date).getHours() * 60 + new Date(res.reservation_date).getMinutes()),
+            end_time: res.end_time || minutesToTime((new Date(res.reservation_date).getHours() * 60 + new Date(res.reservation_date).getMinutes()) + res.duration),
+            duration: res.duration,
+            status: res.status,
+            purpose: res.purpose
+          })),
+          ...subjectConflicts
+        ]
       });
     }
 
@@ -827,6 +876,99 @@ router.get("/laboratory/:laboratory_id/availability", authMiddleware, async (req
       status: 500, 
       message: "Failed to retrieve laboratory computers availability", 
       error: error.message 
+    });
+  }
+});
+
+// Register Client
+router.post("/register-client", async (req, res) => {
+  try {
+    const laboratory = await Laboratory.findOne({ isDeleted: false }).sort({ createdAt: 1 });
+    if (!laboratory) {
+      return res.status(404).json({ status: 404, message: "No laboratory found" });
+    }
+
+    const existingComputers = await Computer.find({ laboratory_id: laboratory._id, isDeleted: false }).select("pc_number");
+    let maxNum = 0;
+    for (const c of existingComputers) {
+      const m = (c.pc_number || "").match(/\d+/g);
+      const n = m && m.length ? parseInt(m[m.length - 1], 10) : NaN;
+      if (!isNaN(n) && n > maxNum) maxNum = n;
+    }
+    const nextNumber = maxNum + 1;
+    const pc_number = `PC-${String(nextNumber).padStart(2, "0")}`;
+
+    const clientToken = crypto.randomBytes(32).toString("hex");
+    const computer = new Computer({
+      laboratory_id: laboratory._id,
+      pc_number,
+      status: "available",
+      notes: null,
+      clientToken
+    });
+
+    await computer.save();
+    await computer.populate("laboratory_id", "name status");
+
+    res.status(201).json({
+      status: 201,
+      message: "Client registered and computer created successfully",
+      data: {
+        id: computer.id,
+        pc_number: computer.pc_number,
+        status: computer.status,
+        laboratory: computer.laboratory_id,
+        clientToken: computer.clientToken
+      },
+    });
+  } catch (error) {
+    console.error("Register client token error:", error);
+    res.status(500).json({
+      status: 500,
+      message: "Failed to register client token",
+      error: error.message,
+    });
+  }
+});
+
+router.post("/client/status", async (req, res) => {
+  try {
+    const { clientToken } = req.body;
+    if (!clientToken || typeof clientToken !== "string") {
+      return res.status(400).json({
+        status: 400,
+        message: "Client token is required in request body",
+      });
+    }
+
+    const computer = await Computer.findOne({
+      clientToken: clientToken.trim(),
+      isDeleted: false,
+    }).populate("laboratory_id", "name status");
+
+    if (!computer) {
+      return res.status(404).json({
+        status: 404,
+        message: "Client token not found",
+      });
+    }
+
+    res.status(200).json({
+      status: 200,
+      message: "Client status retrieved successfully",
+      data: {
+        id: computer.id,
+        pc_number: computer.pc_number,
+        status: computer.status,
+        laboratory: computer.laboratory_id
+      },
+    });
+  } catch (error) {
+    console.error("Get client status error:", error);
+    res.status(500).json({
+      status: 500,
+      message: "Failed to retrieve client status",
+      error: error.message,
     });
   }
 });

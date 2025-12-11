@@ -1,6 +1,7 @@
 import { Router } from "express";
 import Laboratory from "../../../models/Laboratory.js";
 import Reservation from "../../../models/Reservation.js";
+import SubjectScheduler from "../../../models/SubjectScheduler.js";
 import { adminAuthMiddleware, authMiddleware } from "../../../middleware/auth.js";
 
 const router = Router();
@@ -345,6 +346,15 @@ router.get("/availability/:laboratory_id", authMiddleware, async (req, res) => {
       status: { $in: ['approved', 'active'] } // Only consider approved and active reservations
     }).populate('user_id', 'firstname lastname email id_number');
 
+    // Get all subject scheduler entries for the same laboratory and day
+    const subjectSchedules = await SubjectScheduler.find({
+      date: {
+        $gte: startOfDay,
+        $lte: endOfDay
+      },
+      isDeleted: { $ne: true }
+    });
+
     const durationMinutes = parseInt(duration);
     
     // Helper function to convert minutes back to time string
@@ -356,8 +366,19 @@ router.get("/availability/:laboratory_id", authMiddleware, async (req, res) => {
 
     // Helper function to convert military time to minutes since midnight
     const timeToMinutes = (timeString) => {
-      const [hours, minutes] = timeString.split(':').map(Number);
+      if (!timeString) return 0;
+      const [hours, minutes] = timeString.split(":").map(Number);
       return hours * 60 + minutes;
+    };
+
+    // Helper to parse timeslot string (e.g. '08:00-10:00' or '16:55 - 17:55')
+    const parseTimeslot = (timeslot) => {
+      if (!timeslot || typeof timeslot !== 'string') return [0, 0];
+      const parts = timeslot.split('-');
+      if (parts.length !== 2) return [0, 0];
+      const start = parts[0].trim();
+      const end = parts[1].trim();
+      return [timeToMinutes(start), timeToMinutes(end)];
     };
     
     // Generate time slots for the day
@@ -376,10 +397,9 @@ router.get("/availability/:laboratory_id", authMiddleware, async (req, res) => {
       const currentTimeMinutes = now.getHours() * 60 + now.getMinutes();
       const isPast = targetDate.toDateString() === new Date().toDateString() && startMinutes < currentTimeMinutes;
 
-      // Check for conflicts with existing reservations (any overlap means conflict)
-      const hasConflict = reservations.some(reservation => {
+      // Check for conflicts with existing reservations or subject schedules (any overlap means conflict)
+      const hasReservationConflict = reservations.some(reservation => {
         let reservationStartMinutes, reservationEndMinutes;
-        
         if (reservation.start_time && typeof reservation.start_time === 'string') {
           reservationStartMinutes = timeToMinutes(reservation.start_time);
           reservationEndMinutes = timeToMinutes(reservation.end_time);
@@ -390,17 +410,21 @@ router.get("/availability/:laboratory_id", authMiddleware, async (req, res) => {
         } else {
           return false;
         }
-        
-        // For all-day, any overlap within working hours is a conflict
         return (startMinutes < reservationEndMinutes) && (reservationStartMinutes < endMinutes);
       });
 
+      const hasSubjectConflict = subjectSchedules.some(schedule => {
+        if (!schedule.timeslot) return false;
+        const [schedStart, schedEnd] = parseTimeslot(schedule.timeslot);
+        return (startMinutes < schedEnd) && (schedStart < endMinutes);
+      });
+
+      const hasConflict = hasReservationConflict || hasSubjectConflict;
       const isAvailable = !isPast && !hasConflict;
 
       // Get all conflicting reservations for the entire day
       const conflictingReservations = reservations.filter(reservation => {
         let reservationStartMinutes, reservationEndMinutes;
-        
         if (reservation.start_time && typeof reservation.start_time === 'string') {
           reservationStartMinutes = timeToMinutes(reservation.start_time);
           reservationEndMinutes = timeToMinutes(reservation.end_time);
@@ -411,9 +435,28 @@ router.get("/availability/:laboratory_id", authMiddleware, async (req, res) => {
         } else {
           return false;
         }
-        
         return (startMinutes < reservationEndMinutes) && (reservationStartMinutes < endMinutes);
       });
+
+      // Add subject scheduler conflicts as pseudo-reservations
+      const conflictingSubjectSchedules = subjectSchedules.filter(schedule => {
+        if (!schedule.timeslot) return false;
+        const [schedStart, schedEnd] = parseTimeslot(schedule.timeslot);
+        return (startMinutes < schedEnd) && (schedStart < endMinutes);
+      });
+
+      // Map subject scheduler conflicts to a similar structure for UI
+      const subjectConflicts = conflictingSubjectSchedules.map(sched => ({
+        id: sched.id,
+        reservation_number: null,
+        reservation_type: 'subject_schedule',
+        user: sched.instructorName || 'Subject Instructor',
+        start_time: sched.timeslot ? sched.timeslot.split('-')[0].trim() : '',
+        end_time: sched.timeslot ? sched.timeslot.split('-')[1].trim() : '',
+        duration: sched.timeslot ? (parseTimeslot(sched.timeslot)[1] - parseTimeslot(sched.timeslot)[0]) : null,
+        status: 'scheduled',
+        purpose: sched.subjectName || 'Class Schedule'
+      }));
 
       timeSlots.push({
         start_time: slotStartTime,
@@ -423,15 +466,18 @@ router.get("/availability/:laboratory_id", authMiddleware, async (req, res) => {
         has_conflict: hasConflict,
         duration_minutes: durationMinutes,
         is_all_day: true,
-        conflicting_reservations: conflictingReservations.map(res => ({
-          id: res.id,
-          reservation_number: res.reservation_number,
-          user: `${res.user_id.firstname} ${res.user_id.lastname}`,
-          start_time: res.start_time || minutesToTime(new Date(res.reservation_date).getHours() * 60 + new Date(res.reservation_date).getMinutes()),
-          end_time: res.end_time || minutesToTime((new Date(res.reservation_date).getHours() * 60 + new Date(res.reservation_date).getMinutes()) + res.duration),
-          duration: res.duration,
-          status: res.status
-        }))
+        conflicting_reservations: [
+          ...conflictingReservations.map(res => ({
+            id: res.id,
+            reservation_number: res.reservation_number,
+            user: `${res.user_id.firstname} ${res.user_id.lastname}`,
+            start_time: res.start_time || minutesToTime(new Date(res.reservation_date).getHours() * 60 + new Date(res.reservation_date).getMinutes()),
+            end_time: res.end_time || minutesToTime((new Date(res.reservation_date).getHours() * 60 + new Date(res.reservation_date).getMinutes()) + res.duration),
+            duration: res.duration,
+            status: res.status
+          })),
+          ...subjectConflicts
+        ]
       });
     } else {
       // Regular time slot generation for non-all-day durations
@@ -452,33 +498,34 @@ router.get("/availability/:laboratory_id", authMiddleware, async (req, res) => {
       const currentTimeMinutes = now.getHours() * 60 + now.getMinutes();
       const isPast = targetDate.toDateString() === new Date().toDateString() && currentMinutes < currentTimeMinutes;
 
-      // Check for conflicts with existing reservations
-      const hasConflict = reservations.some(reservation => {
+      // Check for conflicts with existing reservations or subject schedules
+      const hasReservationConflict = reservations.some(reservation => {
         let reservationStartMinutes, reservationEndMinutes;
-        
         if (reservation.start_time && typeof reservation.start_time === 'string') {
-          // New format with military time
           reservationStartMinutes = timeToMinutes(reservation.start_time);
           reservationEndMinutes = timeToMinutes(reservation.end_time);
         } else if (reservation.reservation_date && reservation.duration) {
-          // Legacy format
           const reservationStart = new Date(reservation.reservation_date);
           reservationStartMinutes = reservationStart.getHours() * 60 + reservationStart.getMinutes();
           reservationEndMinutes = reservationStartMinutes + reservation.duration;
         } else {
           return false; // Skip if we can't determine the time
         }
-        
-        // Check for overlap: (start1 < end2) && (start2 < end1)
         return (currentMinutes < reservationEndMinutes) && (reservationStartMinutes < slotEndMinutes);
       });
 
+      const hasSubjectConflict = subjectSchedules.some(schedule => {
+        if (!schedule.timeslot) return false;
+        const [schedStart, schedEnd] = parseTimeslot(schedule.timeslot);
+        return (currentMinutes < schedEnd) && (schedStart < slotEndMinutes);
+      });
+
+      const hasConflict = hasReservationConflict || hasSubjectConflict;
       const isAvailable = !isPast && !hasConflict;
 
       // Get conflicting reservations for this slot
       const conflictingReservations = reservations.filter(reservation => {
         let reservationStartMinutes, reservationEndMinutes;
-        
         if (reservation.start_time && typeof reservation.start_time === 'string') {
           reservationStartMinutes = timeToMinutes(reservation.start_time);
           reservationEndMinutes = timeToMinutes(reservation.end_time);
@@ -489,9 +536,28 @@ router.get("/availability/:laboratory_id", authMiddleware, async (req, res) => {
         } else {
           return false;
         }
-        
         return (currentMinutes < reservationEndMinutes) && (reservationStartMinutes < slotEndMinutes);
       });
+
+      // Add subject scheduler conflicts as pseudo-reservations
+      const conflictingSubjectSchedules = subjectSchedules.filter(schedule => {
+        if (!schedule.timeslot) return false;
+        const [schedStart, schedEnd] = parseTimeslot(schedule.timeslot);
+        return (currentMinutes < schedEnd) && (schedStart < slotEndMinutes);
+      });
+
+      // Map subject scheduler conflicts to a similar structure for UI
+      const subjectConflicts = conflictingSubjectSchedules.map(sched => ({
+        id: sched.id,
+        reservation_number: null,
+        reservation_type: 'subject_schedule',
+        user: sched.instructorName || 'Subject Instructor',
+        start_time: sched.timeslot ? sched.timeslot.split('-')[0].trim() : '',
+        end_time: sched.timeslot ? sched.timeslot.split('-')[1].trim() : '',
+        duration: sched.timeslot ? (parseTimeslot(sched.timeslot)[1] - parseTimeslot(sched.timeslot)[0]) : null,
+        status: 'scheduled',
+        purpose: sched.subjectName || 'Class Schedule'
+      }));
 
       timeSlots.push({
         start_time: slotStartTime,
@@ -502,15 +568,18 @@ router.get("/availability/:laboratory_id", authMiddleware, async (req, res) => {
         is_past: isPast,
         has_conflict: hasConflict,
         duration_minutes: durationMinutes,
-        conflicting_reservations: conflictingReservations.map(res => ({
-          id: res.id,
-          reservation_number: res.reservation_number,
-          user: `${res.user_id.firstname} ${res.user_id.lastname}`,
-          start_time: res.start_time || minutesToTime(new Date(res.reservation_date).getHours() * 60 + new Date(res.reservation_date).getMinutes()),
-          end_time: res.end_time || minutesToTime((new Date(res.reservation_date).getHours() * 60 + new Date(res.reservation_date).getMinutes()) + res.duration),
-          duration: res.duration,
-          status: res.status
-        }))
+        conflicting_reservations: [
+          ...conflictingReservations.map(res => ({
+            id: res.id,
+            reservation_number: res.reservation_number,
+            user: `${res.user_id.firstname} ${res.user_id.lastname}`,
+            start_time: res.start_time || minutesToTime(new Date(res.reservation_date).getHours() * 60 + new Date(res.reservation_date).getMinutes()),
+            end_time: res.end_time || minutesToTime((new Date(res.reservation_date).getHours() * 60 + new Date(res.reservation_date).getMinutes()) + res.duration),
+            duration: res.duration,
+            status: res.status
+          })),
+          ...subjectConflicts
+        ]
       });
     }
     }

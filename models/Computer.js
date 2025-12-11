@@ -22,6 +22,11 @@ const computerSchema = new mongoose.Schema(
       trim: true,
       default: null,
     },
+    clientToken: {
+      type: String,
+      trim: true,
+      default: null,
+    },
     isDeleted: {
       type: Boolean,
       default: false,

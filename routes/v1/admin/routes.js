@@ -329,7 +329,7 @@ function getTimeAgo(date) {
 router.get("/", authMiddleware, async (req, res) => {
   try {
     const { page = 1, limit = 10 } = req.query;
-    const filter = { isSuperAdmin: false };
+    const filter = {};
     
     // Convert to numbers and validate
     const pageNum = Math.max(1, parseInt(page));
@@ -389,10 +389,10 @@ router.put("/:id", requireSuperAdmin, async (req, res) => {
 // Delete (Deactivate) Admin
 router.delete("/:id", requireSuperAdmin, async (req, res) => {
   try {
-    const admin = await Admin.findByIdAndUpdate(req.params.id, { status: "inactive" }, { new: true });
+    const admin = await Admin.findByIdAndDelete(req.params.id);
     if (!admin) return res.status(404).json({ message: "Admin not found" });
 
-    res.json({ message: "Admin deactivated successfully", admin });
+    res.json({ message: "Admin deleted successfully", admin });
   } catch (err) {
     res.status(500).json({ error: err.message });
   }

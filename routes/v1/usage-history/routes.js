@@ -488,106 +488,200 @@ router.get("/reports/:type", authMiddleware, async (req, res) => {
     const { type } = req.params;
     const { user_id, user_type, program, date_from, date_to } = req.query;
 
+
+    // Build filter
     const matchFilter = { isDeleted: false };
-
-    // 🔍 Filter by specific user
-    if (user_id) matchFilter.userId = user_id;
-
-    // 🔍 Filter by type of user (Student/Faculty)
-    if (user_type) matchFilter.userType = user_type;
-
-    // 🔍 Filter by program (BSIT, BSED, etc.)
-    if (program) matchFilter.program = program;
-
-    // 🔍 Date filters
+    if (user_id) matchFilter.user_id = user_id;
+    if (user_type) matchFilter.user_type = user_type;
+    if (program) matchFilter.program_course = program;
     if (date_from || date_to) {
       matchFilter.date = {};
       if (date_from) matchFilter.date.$gte = new Date(date_from);
       if (date_to) matchFilter.date.$lte = new Date(date_to);
     }
 
-    // ======================
-    // GROUPING STAGE
-    // ======================
-    let groupStage;
-    if (type === "daily") {
-      groupStage = {
-        _id: {
-          year: { $year: "$date" },
-          month: { $month: "$date" },
-          day: { $dayOfMonth: "$date" }
-        },
-        sessions: { $sum: 1 },
-        totalDuration: { $sum: "$duration" },
-        facultyCount: {
-          $sum: {
-            $cond: [{ $eq: ["$userType", "Faculty"] }, 1, 0]
+    let report = [];
+    let columns = [];
+    if (type === 'daily') {
+      // Group by day, then list users for each day
+      const days = await UsageHistory.aggregate([
+        { $match: matchFilter },
+        {
+          $group: {
+            _id: {
+              year: { $year: "$date" },
+              month: { $month: "$date" },
+              day: { $dayOfMonth: "$date" },
+              user_id: "$user_id"
+            },
+            usage_count: { $sum: 1 },
+            total_usage_time: { $sum: "$duration" }
           }
         },
-        studentCount: {
-          $sum: {
-            $cond: [{ $eq: ["$userType", "Student"] }, 1, 0]
+        { $sort: { "_id.year": -1, "_id.month": -1, "_id.day": -1 } },
+        {
+          $group: {
+            _id: { year: "$_id.year", month: "$_id.month", day: "$_id.day" },
+            users: {
+              $push: {
+                user_id: "$_id.user_id",
+                usage_count: "$usage_count",
+                total_usage_time: "$total_usage_time"
+              }
+            }
           }
-        }
-      };
+        },
+        { $sort: { "_id.year": -1, "_id.month": -1, "_id.day": -1 } }
+      ]);
+      // Populate user details
+      report = [];
+      for (const d of days) {
+        const populatedUsers = await User.find({ _id: { $in: d.users.map(u => u.user_id) } })
+          .select('firstname lastname id_number user_type program_course');
+        const userMap = {};
+        populatedUsers.forEach(u => { userMap[u._id.toString()] = u; });
+        report.push({
+          date: `${d._id.year}-${String(d._id.month).padStart(2, '0')}-${String(d._id.day).padStart(2, '0')}`,
+          users: d.users.map(u => ({
+            name: userMap[u.user_id.toString()] ? `${userMap[u.user_id.toString()].firstname} ${userMap[u.user_id.toString()].lastname}` : '',
+            id_number: userMap[u.user_id.toString()]?.id_number || '',
+            user_type: userMap[u.user_id.toString()]?.user_type || '',
+            program_course: userMap[u.user_id.toString()]?.program_course || '',
+            usage_count: u.usage_count,
+            total_usage_time: u.total_usage_time
+          }))
+        });
+      }
+      columns = ["Date", "Name", "ID Number", "User Type", "Program/Course", "Usage Count", "Total Usage Time (min)"];
+    } else if (type === 'weekly') {
+      // Group by week, then list users for each week
+      const weeks = await UsageHistory.aggregate([
+        { $match: matchFilter },
+        {
+          $group: {
+            _id: {
+              year: { $year: "$date" },
+              week: { $isoWeek: "$date" },
+              user_id: "$user_id"
+            },
+            usage_count: { $sum: 1 },
+            total_usage_time: { $sum: "$duration" }
+          }
+        },
+        { $sort: { "_id.year": -1, "_id.week": -1 } },
+        {
+          $group: {
+            _id: { year: "$_id.year", week: "$_id.week" },
+            users: {
+              $push: {
+                user_id: "$_id.user_id",
+                usage_count: "$usage_count",
+                total_usage_time: "$total_usage_time"
+              }
+            }
+          }
+        },
+        { $sort: { "_id.year": -1, "_id.week": -1 } }
+      ]);
+      // Populate user details
+      report = [];
+      for (const w of weeks) {
+        const populatedUsers = await User.find({ _id: { $in: w.users.map(u => u.user_id) } })
+          .select('firstname lastname id_number user_type program_course');
+        const userMap = {};
+        populatedUsers.forEach(u => { userMap[u._id.toString()] = u; });
+        report.push({
+          year: w._id.year,
+          week: w._id.week,
+          users: w.users.map(u => ({
+            name: userMap[u.user_id.toString()] ? `${userMap[u.user_id.toString()].firstname} ${userMap[u.user_id.toString()].lastname}` : '',
+            id_number: userMap[u.user_id.toString()]?.id_number || '',
+            user_type: userMap[u.user_id.toString()]?.user_type || '',
+            program_course: userMap[u.user_id.toString()]?.program_course || '',
+            usage_count: u.usage_count,
+            total_usage_time: u.total_usage_time
+          }))
+        });
+      }
+      columns = ["Year", "Week", "Name", "ID Number", "User Type", "Program/Course", "Usage Count", "Total Usage Time (min)"];
+    } else if (type === 'monthly') {
+      // Group by month
+      const monthly = await UsageHistory.aggregate([
+        { $match: matchFilter },
+        {
+          $group: {
+            _id: {
+              year: { $year: "$date" },
+              month: { $month: "$date" }
+            },
+            total_sessions: { $sum: 1 },
+            total_usage_time: { $sum: "$duration" },
+            unique_users: { $addToSet: "$user_id" },
+            students: {
+              $addToSet: {
+                $cond: [ { $eq: [ "$user_type", "student" ] }, "$user_id", null ]
+              }
+            },
+            faculty_staff: {
+              $addToSet: {
+                $cond: [ { $eq: [ "$user_type", "faculty" ] }, "$user_id", null ]
+              }
+            }
+          }
+        },
+        { $sort: { "_id.year": -1, "_id.month": -1 } }
+      ]);
 
-    } else if (type === "monthly") {
-      groupStage = {
-        _id: {
-          year: { $year: "$date" },
-          month: { $month: "$date" }
-        },
-        sessions: { $sum: 1 },
-        totalDuration: { $sum: "$duration" },
-        facultyCount: {
-          $sum: {
-            $cond: [{ $eq: ["$userType", "Faculty"] }, 1, 0]
-          }
-        },
-        studentCount: {
-          $sum: {
-            $cond: [{ $eq: ["$userType", "Student"] }, 1, 0]
-          }
+      // For each month, find peak and lowest usage day
+      report = [];
+      for (const m of monthly) {
+        // Find all days in this month
+        const days = await UsageHistory.aggregate([
+          { $match: {
+              ...matchFilter,
+              date: {
+                $gte: new Date(m._id.year, m._id.month - 1, 1),
+                $lt: new Date(m._id.year, m._id.month, 1)
+              }
+            }
+          },
+          {
+            $group: {
+              _id: { day: { $dayOfMonth: "$date" } },
+              sessions: { $sum: 1 }
+            }
+          },
+          { $sort: { sessions: -1 } }
+        ]);
+        let peakDay = null, lowestDay = null;
+        if (days.length > 0) {
+          peakDay = days[0]._id.day;
+          lowestDay = days[days.length - 1]._id.day;
         }
-      };
-
-    } else if (type === "yearly") {
-      groupStage = {
-        _id: { year: { $year: "$date" } },
-        sessions: { $sum: 1 },
-        totalDuration: { $sum: "$duration" },
-        facultyCount: {
-          $sum: {
-            $cond: [{ $eq: ["$userType", "Faculty"] }, 1, 0]
-          }
-        },
-        studentCount: {
-          $sum: {
-            $cond: [{ $eq: ["$userType", "Student"] }, 1, 0]
-          }
-        }
-      };
-
+        report.push({
+          month: `${m._id.year}-${String(m._id.month).padStart(2, '0')}`,
+          total_unique_users: m.unique_users.length,
+          total_sessions: m.total_sessions,
+          total_usage_time: m.total_usage_time,
+          total_students: m.students.filter(s => s !== null).length,
+          total_faculty_staff: m.faculty_staff.filter(f => f !== null).length,
+          peak_usage_day: peakDay,
+          lowest_usage_day: lowestDay
+        });
+      }
+      columns = ["Month", "Total Unique Users", "Total Sessions Logged", "Total Usage Time (min)", "Total Students", "Total Faculty/Staff", "Peak Usage Day", "Lowest Usage Day"];
     } else {
       return res.status(400).json({
         status: 400,
-        message: "Invalid report type. Use daily, monthly, or yearly."
+        message: "Invalid report type. Use daily, weekly, or monthly."
       });
     }
 
-    // ======================
-    // AGGREGATION PIPELINE
-    // ======================
-    const report = await UsageHistory.aggregate([
-      { $match: matchFilter },
-      { $group: groupStage },
-      { $sort: { "_id.year": -1, "_id.month": -1, "_id.day": -1 } }
-    ]);
-
     res.status(200).json({
       status: 200,
-      message: `${type} usage report retrieved successfully`,
+      message: `${type.charAt(0).toUpperCase() + type.slice(1)} usage report retrieved successfully`,
       filters_used: { user_id, user_type, program, date_from, date_to },
+      columns,
       data: report
     });
 
