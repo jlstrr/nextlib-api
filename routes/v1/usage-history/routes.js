@@ -98,7 +98,7 @@ router.get("/my-history", authMiddleware, async (req, res) => {
     const skip = (parseInt(page) - 1) * parseInt(limit);
     
     const usageHistories = await UsageHistory.find(filter)
-      .populate('reservation_id', 'reservation_type status reservation_number')
+      .populate('reservation_id', 'reservation_type status reservation_number duration')
       .populate('approved_by', 'firstname lastname username')
       .sort({ date: -1, time_in: -1 })
       .skip(skip)
@@ -173,14 +173,14 @@ router.get("/:id", authMiddleware, async (req, res) => {
 });
 
 // Start usage session from reservation (Admin only)
-router.post("/start-session", authMiddleware, async (req, res) => {
+router.post("/start-session", async (req, res) => {
   try {
-    const { reservation_id, time_in, notes } = req.body;
+    const { reservation_number, time_in, notes, approved_by } = req.body;
 
-    if (!reservation_id) {
+    if (!reservation_number) {
       return res.status(400).json({
         status: 400,
-        message: "Reservation ID is required",
+        message: "Reservation number is required",
       });
     }
 
@@ -194,7 +194,7 @@ router.post("/start-session", authMiddleware, async (req, res) => {
 
     // Verify reservation exists and is approved
     const reservation = await Reservation.findOne({ 
-      _id: reservation_id, 
+      reservation_number, 
       isDeleted: false 
     });
 
@@ -221,7 +221,7 @@ router.post("/start-session", authMiddleware, async (req, res) => {
 
     // Check if usage session already exists for this reservation
     const existingSession = await UsageHistory.findOne({
-      reservation_id,
+      reservation_id: reservation._id,
       isDeleted: false
     });
 
@@ -233,10 +233,18 @@ router.post("/start-session", authMiddleware, async (req, res) => {
     }
 
     // Create usage history using the static method
+    const adminId = reservation.approved_by || approved_by;
+    if (!adminId) {
+      return res.status(400).json({
+        status: 400,
+        message: "approved_by is required when reservation has no approver",
+      });
+    }
+
     const usageHistory = await UsageHistory.createFromReservation(
-      reservation, 
-      req.user._id, 
-      time_in // Pass the time_in string directly (should be in HH:MM format)
+      reservation,
+      adminId,
+      time_in
     );
 
     if (notes) {
@@ -250,8 +258,8 @@ router.post("/start-session", authMiddleware, async (req, res) => {
 
     // Populate fields for response
     await usageHistory.populate([
-      { path: 'reservation_id', select: 'reservation_type status purpose' },
-      { path: 'user_id', select: 'firstname lastname email id_number' },
+      { path: 'reservation_id', select: 'reservation_type status start_time end_time duration' },
+      { path: 'user_id', select: 'firstname lastname email id_number remaining_time' },
       { path: 'approved_by', select: 'firstname lastname username' }
     ]);
 
@@ -271,7 +279,7 @@ router.post("/start-session", authMiddleware, async (req, res) => {
 });
 
 // End usage session (Admin only)
-router.patch("/:id/end-session", authMiddleware, async (req, res) => {
+router.put("/:id/end-session", async (req, res) => {
   try {
     const { id } = req.params;
     const { 

@@ -531,10 +531,9 @@ router.get("/availability/:computer_id", authMiddleware, async (req, res) => {
       const slotStartTime = minutesToTime(currentMinutes);
       const slotEndTime = minutesToTime(slotEndMinutes);
 
-      // Check if slot is in the past (only for today)
       const now = new Date();
       const currentTimeMinutes = now.getHours() * 60 + now.getMinutes();
-      const isPast = targetDate.toDateString() === new Date().toDateString() && currentMinutes < currentTimeMinutes;
+      const isPast = targetDate.toDateString() === now.toDateString() && currentMinutes < currentTimeMinutes;
 
       // Check for conflicts with existing reservations (both computer and laboratory)
       const hasReservationConflict = allReservations.some(reservation => {
@@ -785,10 +784,9 @@ router.get("/laboratory/:laboratory_id/availability", authMiddleware, async (req
       const slotStartTime = minutesToTime(currentMinutes);
       const slotEndTime = minutesToTime(slotEndMinutes);
 
-      // Check if slot is in the past
       const now = new Date();
       const currentTimeMinutes = now.getHours() * 60 + now.getMinutes();
-      const isPast = targetDate.toDateString() === new Date().toDateString() && currentMinutes < currentTimeMinutes;
+      const isPast = targetDate.toDateString() === now.toDateString() && currentMinutes < currentTimeMinutes;
 
       // Check for conflicts with existing reservations (both computer and laboratory)
       const hasConflict = allReservations.some(reservation => {

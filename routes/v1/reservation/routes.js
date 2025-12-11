@@ -1,5 +1,5 @@
 import { Router } from "express";
-import { nanoid } from "nanoid";
+import { customAlphabet } from "nanoid";
 import Reservation from "../../../models/Reservation.js";
 import User from "../../../models/User.js";
 import Admin from "../../../models/Admin.js";
@@ -75,26 +75,25 @@ const hasEnoughTimeRemaining = (reservationDate, duration) => {
   return { valid: true };
 };
 
-// Generate unique reservation number
+// Generate unique reservation number (alphanumeric only)
 const generateReservationNumber = async () => {
+  const gen = customAlphabet("ABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789", 8);
   let reservationNumber;
   let isUnique = false;
-  
-  // Keep generating until we get a unique number
+
   while (!isUnique) {
-    reservationNumber = `RSV-${nanoid(8).toUpperCase()}`;
-    
-    // Check if this reservation number already exists
+    reservationNumber = `RSV-${gen()}`;
+
     const existingReservation = await Reservation.findOne({
       reservation_number: reservationNumber,
-      isDeleted: false
+      isDeleted: false,
     });
-    
+
     if (!existingReservation) {
       isUnique = true;
     }
   }
-  
+
   return reservationNumber;
 };
 
