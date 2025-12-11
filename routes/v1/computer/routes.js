@@ -270,26 +270,19 @@ router.put("/:id", adminAuthMiddleware, async (req, res) => {
   }
 });
 
-// Delete computer (Admin only) - Soft delete
+// Delete computer (Admin only)
 router.delete("/:id", adminAuthMiddleware, async (req, res) => {
   try {
     const { id } = req.params;
 
-    const computer = await Computer.findOne({ 
-      _id: id, 
-      isDeleted: false 
-    });
+    const deleted = await Computer.findByIdAndDelete(id);
 
-    if (!computer) {
+    if (!deleted) {
       return res.status(404).json({
         status: 404,
         message: "Computer not found",
       });
     }
-
-    // Soft delete
-    computer.isDeleted = true;
-    await computer.save();
 
     res.status(200).json({
       status: 200,
@@ -883,12 +876,17 @@ router.get("/laboratory/:laboratory_id/availability", authMiddleware, async (req
 // Register Client
 router.post("/register-client", async (req, res) => {
   try {
+    // Get first active laboratory
     const laboratory = await Laboratory.findOne({ isDeleted: false }).sort({ createdAt: 1 });
     if (!laboratory) {
       return res.status(404).json({ status: 404, message: "No laboratory found" });
     }
 
-    const existingComputers = await Computer.find({ laboratory_id: laboratory._id, isDeleted: false }).select("pc_number");
+    // Check if there is already a client PC for this machine (optional: match clientToken if passed)
+    // For simplicity, we'll allow one PC per lab incrementally
+    const existingComputers = await Computer.find({ laboratory_id: laboratory._id, isDeleted: false }).select("pc_number clientToken");
+    
+    // Generate next PC number
     let maxNum = 0;
     for (const c of existingComputers) {
       const m = (c.pc_number || "").match(/\d+/g);
@@ -898,19 +896,22 @@ router.post("/register-client", async (req, res) => {
     const nextNumber = maxNum + 1;
     const pc_number = `PC-${String(nextNumber).padStart(2, "0")}`;
 
+    // Generate token
     const clientToken = crypto.randomBytes(32).toString("hex");
+
+    // Create new computer record
     const computer = new Computer({
       laboratory_id: laboratory._id,
       pc_number,
       status: "available",
-      notes: null,
+      notes: `Client Computer No. ${nextNumber}`,
       clientToken
     });
 
     await computer.save();
     await computer.populate("laboratory_id", "name status");
 
-    res.status(201).json({
+    return res.status(201).json({
       status: 201,
       message: "Client registered and computer created successfully",
       data: {
@@ -923,7 +924,28 @@ router.post("/register-client", async (req, res) => {
     });
   } catch (error) {
     console.error("Register client token error:", error);
-    res.status(500).json({
+
+    // Handle duplicate key gracefully
+    if (error.code === 11000) {
+      const existingComputer = await Computer.findOne({
+        laboratory_id: error.keyValue.laboratory_id,
+        pc_number: error.keyValue.pc_number,
+      }).populate("laboratory_id", "name status");
+
+      return res.status(200).json({
+        status: 200,
+        message: "Client PC already exists",
+        data: {
+          id: existingComputer.id,
+          pc_number: existingComputer.pc_number,
+          status: existingComputer.status,
+          laboratory: existingComputer.laboratory_id,
+          clientToken: existingComputer.clientToken
+        },
+      });
+    }
+
+    return res.status(500).json({
       status: 500,
       message: "Failed to register client token",
       error: error.message,
