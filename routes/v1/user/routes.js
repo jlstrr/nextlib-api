@@ -3,6 +3,7 @@ import User from "../../../models/User.js";
 import Reservation from "../../../models/Reservation.js";
 import Computer from "../../../models/Computer.js";
 import UsageHistory from "../../../models/UsageHistory.js";
+import SystemDefaults from "../../../models/SystemDefaults.js";
 import { authMiddleware, adminAuthMiddleware } from "../../../middleware/auth.js";
 import { authorizeRoles } from "../../../middleware/authorize.js";
 
@@ -165,7 +166,6 @@ router.get("/dashboard", authMiddleware, async (req, res) => {
       ]);
 
       const usedTodayMinutes = todayUsage.length > 0 ? todayUsage[0].totalMinutes : 0;
-      const usedTodayHours = Math.round(usedTodayMinutes / 60 * 100) / 100;
 
       // Calculate average hours per day (last 30 days)
       const thirtyDaysAgo = new Date();
@@ -201,15 +201,30 @@ router.get("/dashboard", authMiddleware, async (req, res) => {
         }
       ]);
 
-      const averageHoursPerDay = monthlyUsage.length > 0 && monthlyUsage[0].daysWithUsage > 0 
-        ? Math.round((monthlyUsage[0].totalMinutes / monthlyUsage[0].daysWithUsage) / 60 * 100) / 100
+      const averageMinutesPerDay = monthlyUsage.length > 0 && monthlyUsage[0].daysWithUsage > 0 
+        ? Math.round(monthlyUsage[0].totalMinutes / monthlyUsage[0].daysWithUsage)
         : 0;
 
+      const defaults = await SystemDefaults.getCurrent();
+      const defaultAllottedTime = defaults?.default_allotted_time || "00:00:00";
+      const defaultMinutes = parseTimeToMinutes(defaultAllottedTime);
+      const remainingMinutes = parseTimeToMinutes(req.user.remaining_time || "00:00:00");
+      const usedTotalMinutes = Math.max(defaultMinutes - remainingMinutes, 0);
+      const minutesToHHMMSS = (minutes) => {
+        const h = Math.floor(minutes / 60);
+        const m = Math.floor(minutes % 60);
+        const s = 0;
+        return `${String(h).padStart(2, '0')}:${String(m).padStart(2, '0')}:${String(s).padStart(2, '0')}`;
+      };
+      const usedTotalHHMMSS = minutesToHHMMSS(usedTotalMinutes);
+      const usedTodayHHMMSS = minutesToHHMMSS(usedTodayMinutes);
+
       allottedHoursData = {
-        average_hours_per_day: averageHoursPerDay,
-        remaining_hours_left: toCompactTime(req.user.remaining_time),
-        used_hours_today: usedTodayHours,
-        total_allotted_time: req.user.remaining_time || "00:00:00"
+        average_hours_per_day: minutesToHHMMSS(averageMinutesPerDay),
+        remaining_hours_left: req.user.remaining_time || "00:00:00",
+        used_time_today: usedTodayHHMMSS,
+        used_hours_total: usedTotalHHMMSS,
+        total_allotted_time: defaultAllottedTime
       };
     }
 
