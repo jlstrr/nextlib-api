@@ -1,8 +1,11 @@
 import { Router } from "express";
 import User from "../../../models/User.js";
+import Admin from "../../../models/Admin.js";
 import { authMiddleware, clearSessionCookie } from "../../../middleware/auth.js";
 import crypto from "crypto";
 import sendMail from "../../../utils/mailer.js";
+import bcrypt from "bcryptjs";
+import PasswordResetAudit from "../../../models/PasswordResetAudit.js";
 
 const router = Router();
 
@@ -152,40 +155,154 @@ router.post("/forgot-password", async (req, res) => {
     if (!email) return res.status(400).json({ message: "Email is required" });
 
     const user = await User.findOne({ email, isDeleted: false });
-
-    // Always respond with success to avoid leaking which emails exist
-    const successResponse = { message: "If an account with that email exists, a password reset link has been sent." };
-
-    if (!user) return res.status(200).json(successResponse);
-
-    // Generate token and expiry (1 hour)
-    const token = crypto.randomBytes(20).toString("hex");
-    const expires = Date.now() + 60 * 60 * 1000; // 1 hour
-
-    user.resetPasswordToken = token;
-    user.resetPasswordExpires = new Date(expires);
-    await user.save();
-
-    const frontendUrl = process.env.FRONTEND_URL || "http://localhost:5173";
-    const resetUrl = `${frontendUrl.replace(/\/$/, "")}/reset-password?token=${token}&email=${encodeURIComponent(
-      email
-    )}`;
-
-    const subject = "NextLib - Password reset request";
-    const html = `
-      <p>Hello ${user.firstname || ''},</p>
-      <p>You requested a password reset. Click the link below to reset your password. This link will expire in 1 hour.</p>
-      <p><a href="${resetUrl}">Reset your password</a></p>
-      <p>If you didn't request this, you can ignore this email.</p>
-    `;
-
-    // Send email (may throw)
-    await sendMail(email, subject, html);
-
-    return res.status(200).json(successResponse);
+    if (user) {
+      const now = new Date();
+      const minIntervalMs = 2 * 60 * 1000;
+      const windowMs = 60 * 60 * 1000;
+      if (user.resetPasswordLastRequestAt && now - user.resetPasswordLastRequestAt < minIntervalMs) {
+        await PasswordResetAudit.create({
+          email,
+          actor_type: "user",
+          actor_id: user._id,
+          method: "link",
+          status: "failed",
+          reason: "rate_limited_min_interval",
+          ip_address: req.ip || null,
+          user_agent: req.get("user-agent") || null
+        });
+        return res.status(429).json({ message: "Too many requests. Please try again later." });
+      }
+      if (!user.resetPasswordLastRequestAt || now - user.resetPasswordLastRequestAt > windowMs) {
+        user.resetPasswordRequestCount = 0;
+      }
+      if (user.resetPasswordRequestCount >= 5) {
+        await PasswordResetAudit.create({
+          email,
+          actor_type: "user",
+          actor_id: user._id,
+          method: "link",
+          status: "failed",
+          reason: "rate_limited_hourly_cap",
+          ip_address: req.ip || null,
+          user_agent: req.get("user-agent") || null
+        });
+        return res.status(429).json({ message: "Too many requests. Please try again later." });
+      }
+      const token = crypto.randomBytes(20).toString("hex");
+      const expires = Date.now() + 60 * 60 * 1000;
+      user.resetPasswordToken = token;
+      user.resetPasswordExpires = new Date(expires);
+      user.resetPasswordLastRequestAt = now;
+      user.resetPasswordRequestCount = (user.resetPasswordRequestCount || 0) + 1;
+      await user.save();
+      const frontendUrl = process.env.FRONTEND_URL || "http://localhost:5173";
+      const resetUrl = `${frontendUrl.replace(/\/$/, "")}/reset-password?token=${token}&email=${encodeURIComponent(email)}`;
+      const subject = "NextLib - Password reset request";
+      const html = `
+        <p>Hello ${user.firstname || ''},</p>
+        <p>You requested a password reset. Click the link below to reset your password. This link will expire in 1 hour.</p>
+        <p><a href="${resetUrl}">Reset your password</a></p>
+        <p>If you didn't request this, you can ignore this email.</p>
+      `;
+      await sendMail(email, subject, html);
+      await PasswordResetAudit.create({
+        email,
+        actor_type: "user",
+        actor_id: user._id,
+        method: "link",
+        status: "success",
+        ip_address: req.ip || null,
+        user_agent: req.get("user-agent") || null
+      });
+      return res.status(200).json({ message: "Password reset link sent to your email." });
+    }
+    const admin = await Admin.findOne({ email });
+    if (admin) {
+      const now = new Date();
+      const minIntervalMs = 2 * 60 * 1000;
+      const windowMs = 60 * 60 * 1000;
+      if (admin.resetPasswordOtpRequestedAt && now - admin.resetPasswordOtpRequestedAt < minIntervalMs) {
+        await PasswordResetAudit.create({
+          email,
+          actor_type: "admin",
+          actor_id: admin._id,
+          method: "otp",
+          status: "failed",
+          reason: "rate_limited_min_interval",
+          ip_address: req.ip || null,
+          user_agent: req.get("user-agent") || null
+        });
+        return res.status(429).json({ message: "Too many requests. Please try again later." });
+      }
+      if (!admin.resetPasswordOtpRequestedAt || now - admin.resetPasswordOtpRequestedAt > windowMs) {
+        admin.resetPasswordOtpRequestCount = 0;
+      }
+      if (admin.resetPasswordOtpRequestCount >= 5) {
+        await PasswordResetAudit.create({
+          email,
+          actor_type: "admin",
+          actor_id: admin._id,
+          method: "otp",
+          status: "failed",
+          reason: "rate_limited_hourly_cap",
+          ip_address: req.ip || null,
+          user_agent: req.get("user-agent") || null
+        });
+        return res.status(429).json({ message: "Too many requests. Please try again later." });
+      }
+      const otpNum = crypto.randomInt(0, 1000000);
+      const otp = String(otpNum).padStart(6, "0");
+      const otpHash = await bcrypt.hash(otp, 10);
+      const expires = Date.now() + 10 * 60 * 1000;
+      admin.resetPasswordOtpHash = otpHash;
+      admin.resetPasswordOtpExpires = new Date(expires);
+      admin.resetPasswordOtpRequestedAt = now;
+      admin.resetPasswordOtpRequestCount = (admin.resetPasswordOtpRequestCount || 0) + 1;
+      await admin.save();
+      const subject = "NextLib - Admin password reset OTP";
+      const html = `
+        <p>Hello ${admin.firstname || ''},</p>
+        <p>Your one-time password (OTP) for resetting your admin account is:</p>
+        <h2>${otp}</h2>
+        <p>This OTP expires in 10 minutes.</p>
+        <p>To reset your password, go to the password reset page and enter your email and this OTP.</p>
+        <p>If you did not request this, you can ignore this email.</p>
+      `;
+      await sendMail(email, subject, html);
+      await PasswordResetAudit.create({
+        email,
+        actor_type: "admin",
+        actor_id: admin._id,
+        method: "otp",
+        status: "success",
+        ip_address: req.ip || null,
+        user_agent: req.get("user-agent") || null
+      });
+      return res.status(200).json({ message: "OTP sent to your email." });
+    }
+    await PasswordResetAudit.create({
+      email,
+      actor_type: "unknown",
+      actor_id: null,
+      method: "link",
+      status: "failed",
+      reason: "email_not_found",
+      ip_address: req.ip || null,
+      user_agent: req.get("user-agent") || null
+    });
+    return res.status(404).json({ message: "Email not found." });
   } catch (err) {
     console.error('Forgot password error:', err);
-    // Do not leak errors to client; return generic message
+    await PasswordResetAudit.create({
+      email: req.body?.email || "",
+      actor_type: "unknown",
+      actor_id: null,
+      method: "link",
+      status: "error",
+      reason: "server_error",
+      ip_address: req.ip || null,
+      user_agent: req.get("user-agent") || null
+    });
     return res.status(500).json({ message: "Failed to process password reset request" });
   }
 });
@@ -193,39 +310,98 @@ router.post("/forgot-password", async (req, res) => {
 // --- Reset Password ---
 router.post("/reset-password", async (req, res) => {
   try {
-    const { email, token, password } = req.body;
-    
-    if (!email || !token || !password) {
-      return res.status(400).json({ message: "Email, token and password are required" });
+    const { email, token, otp, password } = req.body;
+    if (!email || !password) {
+      return res.status(400).json({ message: "Email and password are required" });
     }
 
-    // Basic password validation
     if (typeof password !== "string" || password.length < 6) {
       return res.status(400).json({ message: "Password must be at least 6 characters long" });
     }
 
-    // Find user with matching token that hasn't expired
+    const admin = await Admin.findOne({ email });
+    if (admin) {
+      if (!otp) {
+        return res.status(400).json({ message: "OTP is required for admin password reset" });
+      }
+      if (!admin.resetPasswordOtpHash || !admin.resetPasswordOtpExpires || admin.resetPasswordOtpExpires <= new Date()) {
+        await PasswordResetAudit.create({
+          email,
+          actor_type: "admin",
+          actor_id: admin._id,
+          method: "otp",
+          status: "failed",
+          reason: "otp_expired_or_missing",
+          ip_address: req.ip || null,
+          user_agent: req.get("user-agent") || null
+        });
+        return res.status(400).json({ message: "Invalid or expired OTP" });
+      }
+      const valid = await bcrypt.compare(String(otp), admin.resetPasswordOtpHash);
+      if (!valid) {
+        await PasswordResetAudit.create({
+          email,
+          actor_type: "admin",
+          actor_id: admin._id,
+          method: "otp",
+          status: "failed",
+          reason: "otp_invalid",
+          ip_address: req.ip || null,
+          user_agent: req.get("user-agent") || null
+        });
+        return res.status(400).json({ message: "Invalid or expired OTP" });
+      }
+      admin.password = password;
+      admin.resetPasswordOtpHash = null;
+      admin.resetPasswordOtpExpires = null;
+      await admin.save();
+      clearSessionCookie(res);
+      try {
+        const subject = "NextLib - Your admin password has been changed";
+        const html = `
+          <p>Hello ${admin.firstname || ''},</p>
+          <p>Your admin password has been successfully changed.</p>
+        `;
+        await sendMail(admin.email, subject, html);
+      } catch {}
+      await PasswordResetAudit.create({
+        email,
+        actor_type: "admin",
+        actor_id: admin._id,
+        method: "otp",
+        status: "success",
+        ip_address: req.ip || null,
+        user_agent: req.get("user-agent") || null
+      });
+      return res.json({ message: "Password has been reset successfully" });
+    }
+    if (!token) {
+      return res.status(400).json({ message: "Token is required for user password reset" });
+    }
     const user = await User.findOne({
       email,
       isDeleted: false,
       resetPasswordToken: token,
       resetPasswordExpires: { $gt: new Date() },
     });
-
     if (!user) {
+      await PasswordResetAudit.create({
+        email,
+        actor_type: "user",
+        actor_id: null,
+        method: "link",
+        status: "failed",
+        reason: "token_invalid_or_expired",
+        ip_address: req.ip || null,
+        user_agent: req.get("user-agent") || null
+      });
       return res.status(400).json({ message: "Invalid or expired token" });
     }
-
-    // Set new password (User model will hash it automatically on save)
     user.password = password;
     user.resetPasswordToken = undefined;
     user.resetPasswordExpires = undefined;
     await user.save();
-
-    // Clear any existing session cookie for security
     clearSessionCookie(res);
-
-    // Send confirmation email (non-blocking)
     try {
       const subject = "NextLib - Your password has been changed";
       const html = `
@@ -234,16 +410,19 @@ router.post("/reset-password", async (req, res) => {
         <p>For your security, you will need to log in again with your new password.</p>
       `;
       await sendMail(user.email, subject, html);
-    } catch (mailErr) {
-      // Log error but don't fail the reset because confirmation email failed
-      console.error("Failed to send password change confirmation email:", mailErr);
-    }
-
-    // Build user data to return (excluding sensitive fields)
+    } catch {}
     const middle = user.middleInitial ?? user.middle_initial ?? '';
     const fullName = middle ? `${user.firstname} ${middle} ${user.lastname}` : `${user.firstname} ${user.lastname}`;
-
-    return res.json({ 
+    await PasswordResetAudit.create({
+      email,
+      actor_type: "user",
+      actor_id: user._id,
+      method: "link",
+      status: "success",
+      ip_address: req.ip || null,
+      user_agent: req.get("user-agent") || null
+    });
+    return res.json({
       message: "Password has been reset successfully",
       user: {
         id: user._id,
@@ -261,6 +440,18 @@ router.post("/reset-password", async (req, res) => {
     });
   } catch (err) {
     console.error("Reset password error:", err);
+    try {
+      await PasswordResetAudit.create({
+        email: req.body?.email || "",
+        actor_type: "unknown",
+        actor_id: null,
+        method: req.body?.otp ? "otp" : "link",
+        status: "error",
+        reason: "server_error",
+        ip_address: req.ip || null,
+        user_agent: req.get("user-agent") || null
+      });
+    } catch {}
     return res.status(500).json({ message: "Failed to reset password" });
   }
 });

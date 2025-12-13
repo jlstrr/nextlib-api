@@ -50,6 +50,10 @@ const adminSchema = new mongoose.Schema(
       enum: ["active", "inactive", "suspended"],
       default: "active",
     },
+    resetPasswordOtpHash: { type: String, default: null },
+    resetPasswordOtpExpires: { type: Date, default: null },
+    resetPasswordOtpRequestedAt: { type: Date, default: null },
+    resetPasswordOtpRequestCount: { type: Number, default: 0 },
   },
   { timestamps: true }
 );
