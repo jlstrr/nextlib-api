@@ -1,4 +1,6 @@
 import { Router } from "express";
+import mongoose from "mongoose";
+import Computer from "../../../models/Computer.js";
 import UsageHistory from "../../../models/UsageHistory.js";
 import Reservation from "../../../models/Reservation.js";
 import User from "../../../models/User.js";
@@ -175,20 +177,12 @@ router.get("/:id", authMiddleware, async (req, res) => {
 // Start usage session from reservation (Admin only)
 router.post("/start-session", async (req, res) => {
   try {
-    const { reservation_number, time_in, notes, approved_by } = req.body;
+    const { reservation_number, time_in, notes, approved_by, clientToken } = req.body;
 
     if (!reservation_number) {
       return res.status(400).json({
         status: 400,
         message: "Reservation number is required",
-      });
-    }
-
-    // Validate time_in format if provided
-    if (time_in && !/^([01]?[0-9]|2[0-3]):[0-5][0-9]$/.test(time_in)) {
-      return res.status(400).json({
-        status: 400,
-        message: "Time in must be in 24-hour format (HH:MM), e.g., 08:30",
       });
     }
 
@@ -205,18 +199,114 @@ router.post("/start-session", async (req, res) => {
       });
     }
 
+    if (reservation.reservation_type === "laboratory") {
+      if (reservation.status === "completed") {
+        return res.status(400).json({
+          status: 400,
+          message: "Reservation has already completed",
+        });
+      }
+
+      const now = new Date();
+      const start = new Date(reservation.reservation_date);
+      const end = new Date(reservation.reservation_date);
+      const [sh, sm] = reservation.start_time.split(":").map(Number);
+      const [eh, em] = reservation.end_time.split(":").map(Number);
+      start.setHours(sh, sm, 0, 0);
+      end.setHours(eh, em, 0, 0);
+
+      const isToday =
+        start.getFullYear() === now.getFullYear() &&
+        start.getMonth() === now.getMonth() &&
+        start.getDate() === now.getDate();
+
+      if (!isToday) {
+        return res.status(400).json({
+          status: 400,
+          message: "Reservation is not scheduled for today",
+        });
+      }
+
+      if (now < start) {
+        return res.status(400).json({
+          status: 400,
+          message: "Reservation has not started yet",
+        });
+      }
+
+      if (now >= end) {
+        if (reservation.status !== "completed") {
+          reservation.status = "completed";
+          reservation.completed_at = now;
+          await reservation.save();
+        }
+        return res.status(201).json({
+          status: 201,
+          message: "Laboratory session completed",
+          data: {
+            reservation_number: reservation.reservation_number,
+            reservation_type: reservation.reservation_type
+          },
+        });
+      }
+
+      if (reservation.status !== "active") {
+        reservation.status = "active";
+        reservation.started_at = now;
+        await reservation.save();
+      }
+
+      return res.status(201).json({
+        status: 201,
+        message: "Laboratory session is active",
+        data: {
+          reservation_number: reservation.reservation_number,
+          reservation_type: reservation.reservation_type
+        },
+      });
+    }
+
+    if (time_in && !/^([01]?[0-9]|2[0-3]):[0-5][0-9]$/.test(time_in)) {
+      return res.status(400).json({
+        status: 400,
+        message: "Time in must be in 24-hour format (HH:MM), e.g., 08:30",
+      });
+    }
+
     if (reservation.status !== "approved") {
       return res.status(400).json({
         status: 400,
         message: "Only approved reservations can start usage sessions",
       });
     }
-
-    if (reservation.reservation_type !== "computer") {
+    
+    // Verify computer client token if available
+    if (!reservation.computer_id) {
       return res.status(400).json({
         status: 400,
-        message: "Usage sessions can only be started for computer reservations",
+        message: "Computer reservation must include a computer assignment",
       });
+    }
+    const computer = await Computer.findOne({ _id: reservation.computer_id, isDeleted: false });
+    if (!computer) {
+      return res.status(404).json({
+        status: 404,
+        message: "Computer not found",
+      });
+    }
+    if (computer.clientToken) {
+      if (!clientToken || typeof clientToken !== "string" || !clientToken.trim()) {
+        return res.status(400).json({
+          status: 400,
+          message: "Client token is required for this computer",
+        });
+      }
+      if (clientToken.trim() !== computer.clientToken) {
+        return res.status(400).json({
+          status: 400,
+          message: "You are using a different computer than the one reserved",
+        });
+      }
     }
 
     // Check if usage session already exists for this reservation
@@ -275,6 +365,64 @@ router.post("/start-session", async (req, res) => {
       message: "Failed to start usage session",
       error: error.message,
     });
+  }
+});
+
+// End laboratory session without modifying reservation records
+router.post("/end-session/laboratory", async (req, res) => {
+  let session;
+  try {
+    const { reservation_number } = req.body || {};
+
+    if (!reservation_number || typeof reservation_number !== "string" || !reservation_number.trim()) {
+      return res.status(400).json({
+        status: 400,
+        message: "Reservation number is required",
+      });
+    }
+
+    session = await mongoose.startSession();
+    let reservation;
+    await session.withTransaction(async () => {
+      reservation = await Reservation.findOne({
+        reservation_number: reservation_number.trim(),
+        isDeleted: false
+      }).session(session);
+
+      if (!reservation) {
+        throw Object.assign(new Error("Reservation not found"), { httpStatus: 404 });
+      }
+
+      if (reservation.reservation_type !== "laboratory") {
+        throw Object.assign(new Error("Only laboratory reservations can end sessions"), { httpStatus: 400 });
+      }
+
+      // No modifications performed per business rules
+      // Atomic transaction ensures consistent read state
+    });
+
+    return res.status(200).json({
+      status: 200,
+      message: "Laboratory session ended successfully",
+      data: {
+        reservation_number: reservation.reservation_number,
+        reservation_type: reservation.reservation_type
+      },
+    });
+  } catch (error) {
+    const statusCode = error.httpStatus || 500;
+    if (statusCode === 500) {
+      console.error("End laboratory session error:", error);
+    }
+    return res.status(statusCode).json({
+      status: statusCode,
+      message: statusCode === 404 ? "Reservation not found" :
+               statusCode === 400 ? (error.message || "Invalid request") :
+               "Failed to end laboratory session",
+      error: statusCode === 500 ? error.message : undefined
+    });
+  } finally {
+    if (session) session.endSession();
   }
 });
 

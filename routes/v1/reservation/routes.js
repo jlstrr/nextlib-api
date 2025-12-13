@@ -233,7 +233,9 @@ router.get("/", adminAuthMiddleware, async (req, res) => {
     
     // Build filter
     const filter = { isDeleted: false };
-    if (status) filter.status = status;
+    if (status) {
+      filter.status = status;
+    }
     if (reservation_type) filter.reservation_type = reservation_type;
     if (user_id) filter.user_id = user_id;
     if (reservation_number) {
@@ -293,7 +295,7 @@ router.get("/", adminAuthMiddleware, async (req, res) => {
 // Get user's own reservations
 router.get("/my-reservations", authMiddleware, async (req, res) => {
   try {
-    const { status, page = 1, limit = 10 } = req.query;
+    const { status, page = 1, limit = 10, date_from, date_to } = req.query;
     
     // Ensure this is a user, not admin
     if (req.userType === "admin") {
@@ -305,7 +307,24 @@ router.get("/my-reservations", authMiddleware, async (req, res) => {
 
     // Build filter based on user type
     const filter = { user_id: req.user._id, isDeleted: false };
-    if (status) filter.status = status;
+    if (status && status !== "active") {
+      filter.status = status;
+    } else {
+      filter.status = { $ne: "active" };
+    }
+    if (date_from || date_to) {
+      filter.reservation_date = {};
+      if (date_from) {
+        const fromDate = new Date(date_from);
+        fromDate.setHours(0, 0, 0, 0);
+        filter.reservation_date.$gte = fromDate;
+      }
+      if (date_to) {
+        const toDate = new Date(date_to);
+        toDate.setHours(23, 59, 59, 999);
+        filter.reservation_date.$lte = toDate;
+      }
+    }
 
     // Add reservation type filter based on user type
     if (req.user.user_type === "student") {
