@@ -59,7 +59,7 @@ router.post("/login", async (req, res) => {
     res.cookie('session', token, {
       httpOnly: true,
       secure: process.env.NODE_ENV === 'production',
-      sameSite: "none",
+      // sameSite: "none",
       maxAge: 24 * 60 * 60 * 1000 // 24 hours
     });
 
@@ -357,8 +357,25 @@ function getTimeAgo(date) {
 // Get All Admins
 router.get("/", authMiddleware, async (req, res) => {
   try {
-    const { page = 1, limit = 10 } = req.query;
+    const { page = 1, limit = 10, isSuperAdmin } = req.query;
     const filter = {};
+    
+    // Validate and apply isSuperAdmin filter
+    if (typeof isSuperAdmin !== "undefined") {
+      const val = String(isSuperAdmin).toLowerCase().trim();
+      if (val === "true" || val === "1") {
+        filter.isSuperAdmin = true;
+      } else if (val === "false" || val === "0") {
+        filter.isSuperAdmin = false;
+      } else if (val === "") {
+        // Empty string treated as omitted: no filter
+      } else {
+        return res.status(400).json({ 
+          status: 400,
+          message: "Invalid isSuperAdmin value. Use true or false." 
+        });
+      }
+    }
     
     // Convert to numbers and validate
     const pageNum = Math.max(1, parseInt(page));
