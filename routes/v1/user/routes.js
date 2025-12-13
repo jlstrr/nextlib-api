@@ -46,6 +46,151 @@ router.get(
   }
 );
 
+router.post(
+  "/bulk",
+  adminAuthMiddleware,
+  async (req, res) => {
+    try {
+      const input = Array.isArray(req.body) ? req.body : req.body?.users;
+      if (!Array.isArray(input) || input.length === 0) {
+        return res.status(400).json({
+          status: 400,
+          message: "Request body must be an array of users or { users: [...] }"
+        });
+      }
+
+      const results = { created: [], failed: [] };
+
+      const requiredFields = ["id_number", "firstname", "lastname", "email", "password"];
+      const idNumbers = [];
+      const emails = [];
+      const seenIds = new Set();
+      const dupIds = new Set();
+      const seenEmails = new Set();
+      const dupEmails = new Set();
+
+      for (let i = 0; i < input.length; i++) {
+        const u = input[i] || {};
+        const missing = requiredFields.filter(f => !u[f]);
+        if (missing.length > 0) {
+          results.failed.push({
+            index: i,
+            id_number: u.id_number || null,
+            email: u.email || null,
+            message: `Missing required fields: ${missing.join(", ")}`
+          });
+          continue;
+        }
+        const id = String(u.id_number);
+        const em = String(u.email).toLowerCase();
+        if (seenIds.has(id)) dupIds.add(id);
+        seenIds.add(id);
+        if (seenEmails.has(em)) dupEmails.add(em);
+        seenEmails.add(em);
+        idNumbers.push(id);
+        emails.push(em);
+      }
+
+      for (let i = 0; i < input.length; i++) {
+        const u = input[i] || {};
+        if (!u.id_number || !u.email || !u.password || !u.firstname || !u.lastname) continue;
+        const id = String(u.id_number);
+        const em = String(u.email).toLowerCase();
+        if (dupIds.has(id) || dupEmails.has(em)) {
+          results.failed.push({
+            index: i,
+            id_number: id,
+            email: em,
+            message: "Duplicate in input list"
+          });
+        }
+      }
+
+      const existing = await User.find({
+        isDeleted: false,
+        $or: [{ id_number: { $in: idNumbers } }, { email: { $in: emails } }]
+      }).select("id_number email").lean();
+
+      const existingIds = new Set(existing.map(e => String(e.id_number)));
+      const existingEmails = new Set(existing.map(e => String(e.email).toLowerCase()));
+
+      const toCreate = [];
+      for (let i = 0; i < input.length; i++) {
+        const u = input[i] || {};
+        if (!u.id_number || !u.email || !u.password || !u.firstname || !u.lastname) continue;
+        const id = String(u.id_number);
+        const em = String(u.email).toLowerCase();
+        if (dupIds.has(id) || dupEmails.has(em)) continue;
+        if (existingIds.has(id) || existingEmails.has(em)) {
+          results.failed.push({
+            index: i,
+            id_number: id,
+            email: em,
+            message: "User with this ID number or email already exists"
+          });
+          continue;
+        }
+        toCreate.push({
+          id_number: id,
+          firstname: u.firstname,
+          middle_initial: u.middle_initial || "",
+          lastname: u.lastname,
+          program_course: u.program_course ?? null,
+          yearLevel: u.yearLevel ?? null,
+          email: em,
+          password: u.password,
+          user_type: u.user_type || "student",
+          remaining_time: u.remaining_time ?? null,
+          status: u.status || "active"
+        });
+      }
+
+      const creations = await Promise.allSettled(
+        toCreate.map(doc => new User(doc).save())
+      );
+
+      for (let idx = 0, j = 0; idx < input.length; idx++) {
+        const u = input[idx] || {};
+        if (!u.id_number || !u.email || !u.password || !u.firstname || !u.lastname) continue;
+        const id = String(u.id_number);
+        const em = String(u.email).toLowerCase();
+        if (dupIds.has(id) || dupEmails.has(em)) continue;
+        if (existingIds.has(id) || existingEmails.has(em)) continue;
+        const result = creations[j++];
+        if (result.status === "fulfilled") {
+          const createdDoc = result.value.toObject();
+          delete createdDoc.password;
+          delete createdDoc.__v;
+          results.created.push(createdDoc);
+        } else {
+          results.failed.push({
+            index: idx,
+            id_number: id,
+            email: em,
+            message: result.reason?.message || "Failed to create user"
+          });
+        }
+      }
+
+      res.status(201).json({
+        status: 201,
+        message: "Bulk user creation processed",
+        data: {
+          created: results.created,
+          failed: results.failed,
+          counts: {
+            total: input.length,
+            created: results.created.length,
+            failed: results.failed.length
+          }
+        }
+      });
+    } catch (err) {
+      res.status(500).json({ error: err.message });
+    }
+  }
+);
+
 // --- Change password for current logged-in user ---
 router.post(
   "/change-password",
@@ -441,12 +586,15 @@ router.get(
   // authorizeRoles("admin"),
   async (req, res) => {
     try {
-      const { status, page = 1, limit = 10 } = req.query;
+      const { status, user_type, page = 1, limit = 10 } = req.query;
       const filter = { isDeleted: false };
       
       // Add status filter if provided
       if (status) {
         filter.status = status;
+      }
+      if (user_type && ["student", "faculty"].includes(user_type)) {
+        filter.user_type = user_type;
       }
       
       // Convert to numbers and validate
