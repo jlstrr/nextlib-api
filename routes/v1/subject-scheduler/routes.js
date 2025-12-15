@@ -1,5 +1,6 @@
 import { Router } from "express";
 import SubjectScheduler from "../../../models/SubjectScheduler.js";
+import { getStartEndOfDay, getTZMinutesSinceMidnight, getTZCurrentTimeString } from "../../../utils/timezone.js";
 // No auth middleware for computer-usage validation endpoints
 
 const router = Router();
@@ -64,7 +65,8 @@ router.post('/', async (req, res) => {
         }
         // Check for conflicts (overlapping timeslots)
         for (let d of datesToCheck) {
-          const existing = await SubjectScheduler.find({ date: d });
+          const { startOfDay, endOfDay } = getStartEndOfDay(d);
+          const existing = await SubjectScheduler.find({ date: { $gte: startOfDay, $lte: endOfDay } });
           for (let ex of existing) {
             if (isOverlap(timeslot, ex.timeslot)) {
               return res.status(400).json({ error: `A schedule already exists for ${d.toISOString().slice(0,10)} with overlapping timeslot.` });
@@ -87,7 +89,8 @@ router.post('/', async (req, res) => {
       } else {
         // Single schedule
         // Check for conflict (overlapping timeslots)
-        const existing = await SubjectScheduler.find({ date: new Date(date) });
+        const { startOfDay, endOfDay } = getStartEndOfDay(date);
+        const existing = await SubjectScheduler.find({ date: { $gte: startOfDay, $lte: endOfDay } });
         for (let ex of existing) {
           if (isOverlap(timeslot, ex.timeslot)) {
             return res.status(400).json({ error: 'A schedule already exists for this date with overlapping timeslot.' });
@@ -202,11 +205,7 @@ router.post("/computer-usage/start", async (req, res) => {
     if (!existsAny) {
       return res.status(404).json({ status: 404, message: "Subject code not found" });
     }
-    const now = new Date();
-    const startOfDay = new Date(now);
-    startOfDay.setHours(0, 0, 0, 0);
-    const endOfDay = new Date(now);
-    endOfDay.setHours(23, 59, 59, 999);
+    const { startOfDay, endOfDay } = getStartEndOfDay();
     const schedule = await SubjectScheduler.findOne({
       subjectCode: code,
       date: { $gte: startOfDay, $lte: endOfDay }
@@ -218,11 +217,11 @@ router.post("/computer-usage/start", async (req, res) => {
     const toMinutes = (t) => { const [h, m] = t.split(":").map(Number); return h * 60 + m; };
     const startMin = toMinutes(startStr);
     const endMin = toMinutes(endStr);
-    const nowMin = now.getHours() * 60 + now.getMinutes();
+    const nowMin = getTZMinutesSinceMidnight();
     if (!(nowMin >= startMin && nowMin < endMin)) {
       return res.status(409).json({ status: 409, message: "Current time does not match scheduled timeslot" });
     }
-    const timeIn = now.toTimeString().slice(0, 5);
+    const timeIn = getTZCurrentTimeString();
     return res.status(200).json({ status: 200, message: "Validation passed. Access granted.", 
       data: { 
         subjectCode: schedule.subjectCode, 
@@ -251,11 +250,7 @@ router.post("/computer-usage/end", async (req, res) => {
     if (!existsAny) {
       return res.status(404).json({ status: 404, message: "Subject code not found" });
     }
-    const now = new Date();
-    const startOfDay = new Date(now);
-    startOfDay.setHours(0, 0, 0, 0);
-    const endOfDay = new Date(now);
-    endOfDay.setHours(23, 59, 59, 999);
+    const { startOfDay, endOfDay } = getStartEndOfDay();
     const schedule = await SubjectScheduler.findOne({
       subjectCode: code,
       date: { $gte: startOfDay, $lte: endOfDay }
@@ -267,11 +262,11 @@ router.post("/computer-usage/end", async (req, res) => {
     const toMinutes = (t) => { const [h, m] = t.split(":").map(Number); return h * 60 + m; };
     const startMin = toMinutes(startStr);
     const endMin = toMinutes(endStr);
-    const nowMin = now.getHours() * 60 + now.getMinutes();
+    const nowMin = getTZMinutesSinceMidnight();
     if (nowMin < startMin) {
       return res.status(409).json({ status: 409, message: "Current time is before scheduled start time" });
     }
-    const timeOut = now.toTimeString().slice(0, 5);
+    const timeOut = getTZCurrentTimeString();
     const toMin = (t) => { const [h, m] = t.split(":").map(Number); return h * 60 + m; };
     const scheduledDuration = toMin(endStr) - toMin(startStr);
     return res.status(200).json({

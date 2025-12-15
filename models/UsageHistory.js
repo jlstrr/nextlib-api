@@ -1,4 +1,5 @@
 import mongoose from "mongoose";
+import { getTZCurrentTimeString } from "../utils/timezone.js";
 
 const usageHistorySchema = new mongoose.Schema(
   {
@@ -124,9 +125,8 @@ usageHistorySchema.pre('save', function(next) {
       this.status = 'completed';
     }
   } else if (this.status === 'completed' && !this.time_out) {
-    // If marked as completed but no time_out, set time_out to current time
     const now = new Date();
-    this.time_out = now.toTimeString().slice(0, 5); // Format as HH:MM
+    this.time_out = getTZCurrentTimeString(now);
     
     // Calculate duration
     const timeInMinutes = this.time_in.split(':').reduce((acc, time) => (60 * acc) + +time);
@@ -149,11 +149,11 @@ usageHistorySchema.statics.createFromReservation = async function(reservation, a
       } else {
         // If it's a Date object or string, convert it
         const timeDate = new Date(time_in);
-        formattedTimeIn = timeDate.toTimeString().slice(0, 5); // Extract HH:MM
+        formattedTimeIn = getTZCurrentTimeString(timeDate);
       }
     } else {
       const now = new Date();
-      formattedTimeIn = now.toTimeString().slice(0, 5); // Current time as HH:MM
+      formattedTimeIn = getTZCurrentTimeString(now);
     }
 
     const usageHistory = new this({

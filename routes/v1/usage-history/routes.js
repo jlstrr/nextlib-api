@@ -5,6 +5,7 @@ import UsageHistory from "../../../models/UsageHistory.js";
 import Reservation from "../../../models/Reservation.js";
 import User from "../../../models/User.js";
 import { adminAuthMiddleware, authMiddleware } from "../../../middleware/auth.js";
+import { getStartEndOfDay, getTZMinutesSinceMidnight, getTZCurrentTimeString, isSameTZDay } from "../../../utils/timezone.js";
 
 const router = Router();
 
@@ -32,8 +33,8 @@ router.get("/", adminAuthMiddleware, async (req, res) => {
     // Date range filter
     if (date_from || date_to) {
       filter.date = {};
-      if (date_from) filter.date.$gte = new Date(date_from);
-      if (date_to) filter.date.$lte = new Date(date_to);
+      if (date_from) filter.date.$gte = getStartEndOfDay(date_from).startOfDay;
+      if (date_to) filter.date.$lte = getStartEndOfDay(date_to).endOfDay;
     }
 
     // Pagination
@@ -92,8 +93,8 @@ router.get("/my-history", authMiddleware, async (req, res) => {
     // Date range filter
     if (date_from || date_to) {
       filter.date = {};
-      if (date_from) filter.date.$gte = new Date(date_from);
-      if (date_to) filter.date.$lte = new Date(date_to);
+      if (date_from) filter.date.$gte = getStartEndOfDay(date_from).startOfDay;
+      if (date_to) filter.date.$lte = getStartEndOfDay(date_to).endOfDay;
     }
 
     // Pagination
@@ -208,17 +209,7 @@ router.post("/start-session", async (req, res) => {
       }
 
       const now = new Date();
-      const start = new Date(reservation.reservation_date);
-      const end = new Date(reservation.reservation_date);
-      const [sh, sm] = reservation.start_time.split(":").map(Number);
-      const [eh, em] = reservation.end_time.split(":").map(Number);
-      start.setHours(sh, sm, 0, 0);
-      end.setHours(eh, em, 0, 0);
-
-      const isToday =
-        start.getFullYear() === now.getFullYear() &&
-        start.getMonth() === now.getMonth() &&
-        start.getDate() === now.getDate();
+      const isToday = isSameTZDay(now, new Date(reservation.reservation_date));
 
       if (!isToday) {
         return res.status(400).json({
@@ -227,14 +218,17 @@ router.post("/start-session", async (req, res) => {
         });
       }
 
-      if (now < start) {
+      const startMin = reservation.start_time ? reservation.start_time.split(":").map(Number).reduce((h, m) => h * 60 + m) : getTZMinutesSinceMidnight(new Date(reservation.reservation_date));
+      const endMin = reservation.end_time ? reservation.end_time.split(":").map(Number).reduce((h, m) => h * 60 + m) : startMin + (reservation.duration || 0);
+      const nowMin = getTZMinutesSinceMidnight(now);
+      if (nowMin < startMin) {
         return res.status(400).json({
           status: 400,
           message: "Reservation has not started yet",
         });
       }
 
-      if (now >= end) {
+      if (nowMin >= endMin) {
         if (reservation.status !== "completed") {
           reservation.status = "completed";
           reservation.completed_at = now;
@@ -310,10 +304,9 @@ router.post("/start-session", async (req, res) => {
     }
     
     const now = new Date();
-    const start = new Date(reservation.reservation_date);
-    const [sh, sm] = reservation.start_time.split(":").map(Number);
-    start.setHours(sh, sm, 0, 0);
-    if (now < start) {
+    const startMin = reservation.start_time ? reservation.start_time.split(":").map(Number).reduce((h, m) => h * 60 + m) : getTZMinutesSinceMidnight(new Date(reservation.reservation_date));
+    const nowMin = getTZMinutesSinceMidnight(now);
+    if (nowMin < startMin) {
       return res.status(400).json({
         status: 400,
         message: "Reservation has not started yet",
@@ -321,9 +314,8 @@ router.post("/start-session", async (req, res) => {
     }
     if (time_in) {
       const [tinH, tinM] = time_in.split(":").map(Number);
-      const provided = new Date(reservation.reservation_date);
-      provided.setHours(tinH, tinM, 0, 0);
-      if (provided < start) {
+      const providedMin = tinH * 60 + tinM;
+      if (providedMin < startMin) {
         return res.status(400).json({
           status: 400,
           message: "Time in cannot be earlier than the scheduled start time",
@@ -488,9 +480,8 @@ router.put("/:id/end-session", async (req, res) => {
       }
       usageHistory.time_out = time_out;
     } else {
-      // Use current time in HH:MM format
       const now = new Date();
-      usageHistory.time_out = now.toTimeString().slice(0, 5);
+      usageHistory.time_out = getTZCurrentTimeString(now);
     }
     
     usageHistory.status = status;
@@ -580,8 +571,8 @@ router.get("/statistics/overview", adminAuthMiddleware, async (req, res) => {
     // Date range filter
     if (date_from || date_to) {
       matchFilter.date = {};
-      if (date_from) matchFilter.date.$gte = new Date(date_from);
-      if (date_to) matchFilter.date.$lte = new Date(date_to);
+      if (date_from) matchFilter.date.$gte = getStartEndOfDay(date_from).startOfDay;
+      if (date_to) matchFilter.date.$lte = getStartEndOfDay(date_to).endOfDay;
     }
 
     // Get statistics by status

@@ -9,6 +9,7 @@ import Laboratory from "../../../models/Laboratory.js";
 import { adminAuthMiddleware, authMiddleware } from "../../../middleware/auth.js";
 import sendMail from "../../../utils/mailer.js";
 import SubjectScheduler from "../../../models/SubjectScheduler.js";
+import { getStartEndOfDay, getTZMinutesSinceMidnight, isSameTZDay, getTZParts } from "../../../utils/timezone.js";
 
 const router = Router();
 
@@ -47,31 +48,20 @@ const combineDateAndTime = (date, timeString) => {
 const hasEnoughTimeRemaining = (reservationDate, duration) => {
   const now = new Date();
   const reservation = new Date(reservationDate);
-  
-  // Check if the reservation is for today
-  const isToday = now.toDateString() === reservation.toDateString();
-  
+  const isToday = isSameTZDay(now, reservation);
   if (!isToday) {
-    return { valid: true }; // Future dates are always valid
+    return { valid: true };
   }
-  
-  // For today's reservations, check if there's enough time remaining
-  const currentHour = now.getHours();
-  const currentMinute = now.getMinutes();
-  const currentTimeInMinutes = currentHour * 60 + currentMinute;
-  
-  // Calculate end of day (assuming 24:00 or 1440 minutes)
-  const endOfDayInMinutes = 24 * 60; // 1440 minutes
+  const currentTimeInMinutes = getTZMinutesSinceMidnight(now);
+  const endOfDayInMinutes = 24 * 60;
   const remainingMinutes = endOfDayInMinutes - currentTimeInMinutes;
-  
   if (duration > remainingMinutes) {
     return {
       valid: false,
       message: `Cannot reserve for ${duration} minutes. Only ${remainingMinutes} minutes remaining in the current day.`,
-      remainingMinutes
+      remainingMinutes,
     };
   }
-  
   return { valid: true };
 };
 
@@ -100,6 +90,7 @@ const generateReservationNumber = async () => {
 // Check for reservation conflicts
 const checkReservationConflicts = async (reservationDate, startTime, duration, reservationType, excludeReservationId = null, laboratoryId = null, computerId = null) => {
   const requestedDate = new Date(reservationDate);
+  const { startOfDay, endOfDay } = getStartEndOfDay(requestedDate);
   
   // Calculate requested time range in minutes
   let requestedStartMinutes, requestedEndMinutes;
@@ -112,10 +103,10 @@ const checkReservationConflicts = async (reservationDate, startTime, duration, r
     // Legacy DateTime format
     const requestedStartTime = new Date(startTime);
     const requestedEndTime = new Date(requestedStartTime.getTime() + (duration * 60 * 1000));
-    
-    // Convert to minutes since midnight for comparison
-    requestedStartMinutes = requestedStartTime.getHours() * 60 + requestedStartTime.getMinutes();
-    requestedEndMinutes = requestedEndTime.getHours() * 60 + requestedEndTime.getMinutes();
+    const startParts = getTZParts(requestedStartTime);
+    const endParts = getTZParts(requestedEndTime);
+    requestedStartMinutes = startParts.hour * 60 + startParts.minute;
+    requestedEndMinutes = endParts.hour * 60 + endParts.minute;
   }
   
   // Build query to find conflicting reservations on the same date
@@ -123,14 +114,7 @@ const checkReservationConflicts = async (reservationDate, startTime, duration, r
     reservation_type: reservationType,
     status: { $in: ['approved', 'active'] },
     isDeleted: false,
-    // Same date check
-    $expr: {
-      $and: [
-        { $eq: [{ $year: '$reservation_date' }, { $year: requestedDate }] },
-        { $eq: [{ $month: '$reservation_date' }, { $month: requestedDate }] },
-        { $eq: [{ $dayOfMonth: '$reservation_date' }, { $dayOfMonth: requestedDate }] }
-      ]
-    }
+    reservation_date: { $gte: startOfDay, $lte: endOfDay }
   };
   
   // Exclude current reservation if updating
@@ -160,7 +144,8 @@ const checkReservationConflicts = async (reservationDate, startTime, duration, r
     } else if (existing.reservation_date && existing.duration) {
       // Legacy format
       const existingStart = new Date(existing.reservation_date);
-      existingStartMinutes = existingStart.getHours() * 60 + existingStart.getMinutes();
+      const p = getTZParts(existingStart);
+      existingStartMinutes = p.hour * 60 + p.minute;
       existingEndMinutes = existingStartMinutes + existing.duration;
     } else {
       return false; // Skip if we can't determine the time
@@ -176,25 +161,13 @@ const checkReservationConflicts = async (reservationDate, startTime, duration, r
     subjectConflicts = await SubjectScheduler.find({
       laboratory_id: laboratoryId,
       isDeleted: false,
-      $expr: {
-        $and: [
-          { $eq: [{ $year: '$date' }, { $year: requestedDate }] },
-          { $eq: [{ $month: '$date' }, { $month: requestedDate }] },
-          { $eq: [{ $dayOfMonth: '$date' }, { $dayOfMonth: requestedDate }] }
-        ]
-      }
+      date: { $gte: startOfDay, $lte: endOfDay }
     });
   } else if (reservationType === 'computer' && computerId) {
     subjectConflicts = await SubjectScheduler.find({
       computer_id: computerId,
       isDeleted: false,
-      $expr: {
-        $and: [
-          { $eq: [{ $year: '$date' }, { $year: requestedDate }] },
-          { $eq: [{ $month: '$date' }, { $month: requestedDate }] },
-          { $eq: [{ $dayOfMonth: '$date' }, { $dayOfMonth: requestedDate }] }
-        ]
-      }
+      date: { $gte: startOfDay, $lte: endOfDay }
     });
   }
 
@@ -242,19 +215,10 @@ router.get("/", adminAuthMiddleware, async (req, res) => {
       filter.reservation_number = { $regex: reservation_number, $options: 'i' }; // Case-insensitive partial match
     }
     
-    // Date range filter
     if (date_from || date_to) {
       filter.reservation_date = {};
-      if (date_from) {
-        const fromDate = new Date(date_from);
-        fromDate.setHours(0, 0, 0, 0);
-        filter.reservation_date.$gte = fromDate;
-      }
-      if (date_to) {
-        const toDate = new Date(date_to);
-        toDate.setHours(23, 59, 59, 999);
-        filter.reservation_date.$lte = toDate;
-      }
+      if (date_from) filter.reservation_date.$gte = getStartEndOfDay(date_from).startOfDay;
+      if (date_to) filter.reservation_date.$lte = getStartEndOfDay(date_to).endOfDay;
     }
 
     // Pagination
@@ -314,16 +278,8 @@ router.get("/my-reservations", authMiddleware, async (req, res) => {
     // }
     if (date_from || date_to) {
       filter.reservation_date = {};
-      if (date_from) {
-        const fromDate = new Date(date_from);
-        fromDate.setHours(0, 0, 0, 0);
-        filter.reservation_date.$gte = fromDate;
-      }
-      if (date_to) {
-        const toDate = new Date(date_to);
-        toDate.setHours(23, 59, 59, 999);
-        filter.reservation_date.$lte = toDate;
-      }
+      if (date_from) filter.reservation_date.$gte = getStartEndOfDay(date_from).startOfDay;
+      if (date_to) filter.reservation_date.$lte = getStartEndOfDay(date_to).endOfDay;
     }
 
     // Add reservation type filter based on user type
@@ -1325,19 +1281,10 @@ router.get("/statistics/overview", adminAuthMiddleware, async (req, res) => {
     // Build match filter
     const matchFilter = { isDeleted: false };
     
-    // Date range filter
     if (date_from || date_to) {
       matchFilter.reservation_date = {};
-      if (date_from) {
-        const fromDate = new Date(date_from);
-        fromDate.setHours(0, 0, 0, 0);
-        matchFilter.reservation_date.$gte = fromDate;
-      }
-      if (date_to) {
-        const toDate = new Date(date_to);
-        toDate.setHours(23, 59, 59, 999);
-        matchFilter.reservation_date.$lte = toDate;
-      }
+      if (date_from) matchFilter.reservation_date.$gte = getStartEndOfDay(date_from).startOfDay;
+      if (date_to) matchFilter.reservation_date.$lte = getStartEndOfDay(date_to).endOfDay;
     }
 
     const statusStatistics = await Reservation.aggregate([
@@ -1541,9 +1488,9 @@ router.post("/check-conflicts", authMiddleware, async (req, res) => {
         user_id: conflict.user_id._id,
         reservation_date: conflict.reservation_date,
         start_time: conflict.start_time || (conflict.reservation_date ? 
-          `${conflict.reservation_date.getHours().toString().padStart(2, '0')}:${conflict.reservation_date.getMinutes().toString().padStart(2, '0')}` : null),
+          `${String(getTZParts(new Date(conflict.reservation_date)).hour).padStart(2, '0')}:${String(getTZParts(new Date(conflict.reservation_date)).minute).padStart(2, '0')}` : null),
         end_time: conflict.end_time || (conflict.duration ? 
-          minutesToTime(timeToMinutes(conflict.start_time || '00:00') + conflict.duration) : null),
+          minutesToTime((conflict.start_time ? timeToMinutes(conflict.start_time) : (getTZParts(new Date(conflict.reservation_date)).hour * 60 + getTZParts(new Date(conflict.reservation_date)).minute)) + conflict.duration) : null),
         duration: conflict.duration,
         status: conflict.status
       })) : [],

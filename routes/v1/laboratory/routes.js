@@ -3,38 +3,27 @@ import Laboratory from "../../../models/Laboratory.js";
 import Reservation from "../../../models/Reservation.js";
 import SubjectScheduler from "../../../models/SubjectScheduler.js";
 import { adminAuthMiddleware, authMiddleware } from "../../../middleware/auth.js";
+import { getStartEndOfDay, getTZMinutesSinceMidnight, getTZDateString, getTZParts, isSameTZDay } from "../../../utils/timezone.js";
 
 const router = Router();
 
-// Helper function to check if there's enough time remaining in the current day
 const hasEnoughTimeRemaining = (reservationDate, duration) => {
   const now = new Date();
   const reservation = new Date(reservationDate);
-  
-  // Check if the reservation is for today
-  const isToday = now.toDateString() === reservation.toDateString();
-  
+  const isToday = isSameTZDay(now, reservation);
   if (!isToday) {
-    return { valid: true }; // Future dates are always valid
+    return { valid: true };
   }
-  
-  // For today's reservations, check if there's enough time remaining
-  const currentHour = now.getHours();
-  const currentMinute = now.getMinutes();
-  const currentTimeInMinutes = currentHour * 60 + currentMinute;
-  
-  // Calculate end of day (assuming 24:00 or 1440 minutes)
-  const endOfDayInMinutes = 24 * 60; // 1440 minutes
+  const currentTimeInMinutes = getTZMinutesSinceMidnight(now);
+  const endOfDayInMinutes = 24 * 60;
   const remainingMinutes = endOfDayInMinutes - currentTimeInMinutes;
-  
   if (duration > remainingMinutes) {
     return {
       valid: false,
       message: `Cannot reserve for ${duration} minutes. Only ${remainingMinutes} minutes remaining in the current day.`,
-      remainingMinutes
+      remainingMinutes,
     };
   }
-  
   return { valid: true };
 };
 
@@ -305,16 +294,7 @@ router.get("/availability/:laboratory_id", authMiddleware, async (req, res) => {
       });
     }
 
-    // If no date provided, use today
-    const targetDate = date ? new Date(date) : new Date();
-    
-    // Set date to start of day
-    const startOfDay = new Date(targetDate);
-    startOfDay.setHours(0, 0, 0, 0);
-    
-    // Set date to end of day
-    const endOfDay = new Date(targetDate);
-    endOfDay.setHours(23, 59, 59, 999);
+    const { startOfDay, endOfDay, targetDate, tzDateString } = getStartEndOfDay(date);
 
     // Validate duration (30 minutes, 1 hour, 2 hours, and 9 hours for all-day)
     if (![30, 60, 120, 540].includes(parseInt(duration))) {
@@ -393,9 +373,8 @@ router.get("/availability/:laboratory_id", authMiddleware, async (req, res) => {
       const slotEndTime = minutesToTime(endMinutes);
 
       // Check if slot is in the past (only for today)
-      const now = new Date();
-      const currentTimeMinutes = now.getHours() * 60 + now.getMinutes();
-      const isPast = targetDate.toDateString() === new Date().toDateString() && startMinutes < currentTimeMinutes;
+      const currentTimeMinutes = getTZMinutesSinceMidnight();
+      const isPast = tzDateString === getTZDateString() && startMinutes < currentTimeMinutes;
 
       // Check for conflicts with existing reservations or subject schedules (any overlap means conflict)
       const hasReservationConflict = reservations.some(reservation => {
@@ -404,8 +383,8 @@ router.get("/availability/:laboratory_id", authMiddleware, async (req, res) => {
           reservationStartMinutes = timeToMinutes(reservation.start_time);
           reservationEndMinutes = timeToMinutes(reservation.end_time);
         } else if (reservation.reservation_date && reservation.duration) {
-          const reservationStart = new Date(reservation.reservation_date);
-          reservationStartMinutes = reservationStart.getHours() * 60 + reservationStart.getMinutes();
+          const { hour, minute } = getTZParts(new Date(reservation.reservation_date));
+          reservationStartMinutes = hour * 60 + minute;
           reservationEndMinutes = reservationStartMinutes + reservation.duration;
         } else {
           return false;
@@ -494,9 +473,8 @@ router.get("/availability/:laboratory_id", authMiddleware, async (req, res) => {
       const slotEndTime = minutesToTime(slotEndMinutes);
 
       // Check if slot is in the past (only for today)
-      const now = new Date();
-      const currentTimeMinutes = now.getHours() * 60 + now.getMinutes();
-      const isPast = targetDate.toDateString() === new Date().toDateString() && currentMinutes < currentTimeMinutes;
+      const currentTimeMinutes = getTZMinutesSinceMidnight();
+      const isPast = tzDateString === getTZDateString() && currentMinutes < currentTimeMinutes;
 
       // Check for conflicts with existing reservations or subject schedules
       const hasReservationConflict = reservations.some(reservation => {
@@ -505,8 +483,8 @@ router.get("/availability/:laboratory_id", authMiddleware, async (req, res) => {
           reservationStartMinutes = timeToMinutes(reservation.start_time);
           reservationEndMinutes = timeToMinutes(reservation.end_time);
         } else if (reservation.reservation_date && reservation.duration) {
-          const reservationStart = new Date(reservation.reservation_date);
-          reservationStartMinutes = reservationStart.getHours() * 60 + reservationStart.getMinutes();
+          const { hour, minute } = getTZParts(new Date(reservation.reservation_date));
+          reservationStartMinutes = hour * 60 + minute;
           reservationEndMinutes = reservationStartMinutes + reservation.duration;
         } else {
           return false; // Skip if we can't determine the time
@@ -573,8 +551,8 @@ router.get("/availability/:laboratory_id", authMiddleware, async (req, res) => {
             id: res.id,
             reservation_number: res.reservation_number,
             user: `${res.user_id.firstname} ${res.user_id.lastname}`,
-            start_time: res.start_time || minutesToTime(new Date(res.reservation_date).getHours() * 60 + new Date(res.reservation_date).getMinutes()),
-            end_time: res.end_time || minutesToTime((new Date(res.reservation_date).getHours() * 60 + new Date(res.reservation_date).getMinutes()) + res.duration),
+            start_time: res.start_time || minutesToTime(getTZParts(new Date(res.reservation_date)).hour * 60 + getTZParts(new Date(res.reservation_date)).minute),
+            end_time: res.end_time || minutesToTime((getTZParts(new Date(res.reservation_date)).hour * 60 + getTZParts(new Date(res.reservation_date)).minute) + res.duration),
             duration: res.duration,
             status: res.status
           })),
@@ -608,7 +586,7 @@ router.get("/availability/:laboratory_id", authMiddleware, async (req, res) => {
           status: laboratory.status,
           description: laboratory.description
         },
-        date: targetDate.toISOString().split('T')[0],
+        date: tzDateString,
         duration_minutes: parseInt(duration),
         is_all_day: parseInt(duration) === 540,
         time_slots: timeSlots,
