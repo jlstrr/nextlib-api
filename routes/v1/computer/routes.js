@@ -510,7 +510,7 @@ router.get("/availability/:computer_id", authMiddleware, async (req, res) => {
     // Generate basic time slots for the day (8:00 AM to 5:00 PM)
     const timeSlots = [];
     const startMinutes = 8 * 60; // 8:00 AM
-    const endMinutes = 17 * 60;  // 5:00 PM
+    const endMinutes = 19 * 60;  // 5:00 PM
     
     for (let currentMinutes = startMinutes; currentMinutes < endMinutes; currentMinutes += durationMinutes) {
       const slotEndMinutes = currentMinutes + durationMinutes;
