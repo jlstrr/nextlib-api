@@ -532,8 +532,9 @@ router.get("/availability/:computer_id", authMiddleware, async (req, res) => {
       const slotEndTime = minutesToTime(slotEndMinutes);
 
       const now = new Date();
-      const currentTimeMinutes = now.getHours() * 60 + now.getMinutes();
-      const isPast = targetDate.toDateString() === now.toDateString() && currentMinutes < currentTimeMinutes;
+      const slotStartDate = new Date(targetDate);
+      slotStartDate.setHours(Math.floor(currentMinutes / 60), currentMinutes % 60, 0, 0);
+      const isPast = slotStartDate < now;
 
       // Check for conflicts with existing reservations (both computer and laboratory)
       const hasReservationConflict = allReservations.some(reservation => {
