@@ -5,6 +5,10 @@ const SubjectSchedulerSchema = new mongoose.Schema({
     type: String,
     required: true
   },
+  subjectCode: {
+    type: String,
+    required: true
+  },
   instructorName: {
     type: String,
     required: true
@@ -29,7 +33,8 @@ const SubjectSchedulerSchema = new mongoose.Schema({
   repeatEndDate: {
     type: Date,
     default: null
-  }
+  },
+  
 });
 
 export default mongoose.model('SubjectScheduler', SubjectSchedulerSchema);

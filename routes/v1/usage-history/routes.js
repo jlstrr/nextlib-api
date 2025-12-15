@@ -308,6 +308,28 @@ router.post("/start-session", async (req, res) => {
         });
       }
     }
+    
+    const now = new Date();
+    const start = new Date(reservation.reservation_date);
+    const [sh, sm] = reservation.start_time.split(":").map(Number);
+    start.setHours(sh, sm, 0, 0);
+    if (now < start) {
+      return res.status(400).json({
+        status: 400,
+        message: "Reservation has not started yet",
+      });
+    }
+    if (time_in) {
+      const [tinH, tinM] = time_in.split(":").map(Number);
+      const provided = new Date(reservation.reservation_date);
+      provided.setHours(tinH, tinM, 0, 0);
+      if (provided < start) {
+        return res.status(400).json({
+          status: 400,
+          message: "Time in cannot be earlier than the scheduled start time",
+        });
+      }
+    }
 
     // Check if usage session already exists for this reservation
     const existingSession = await UsageHistory.findOne({

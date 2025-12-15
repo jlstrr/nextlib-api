@@ -307,11 +307,11 @@ router.get("/my-reservations", authMiddleware, async (req, res) => {
 
     // Build filter based on user type
     const filter = { user_id: req.user._id, isDeleted: false };
-    if (status && status !== "active") {
-      filter.status = status;
-    } else {
-      filter.status = { $ne: "active" };
-    }
+    // if (status && status !== "active") {
+    //   filter.status = status;
+    // } else {
+    //   filter.status = { $ne: "active" };
+    // }
     if (date_from || date_to) {
       filter.reservation_date = {};
       if (date_from) {
