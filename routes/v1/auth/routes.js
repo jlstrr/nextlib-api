@@ -62,10 +62,14 @@ router.post("/login", async (req, res) => {
       return res.status(401).json({ message: "Invalid credentials" });
     }
 
-    // Check if user account is active
-    if (user.status !== "active") {
-      return res.status(403).json({ message: "User account is not active" });
+    // Check if user account is suspended
+    if (user.status === "suspended") {
+      return res.status(403).json({ message: "User account is suspended" });
     }
+
+    // Set user status to active
+    user.status = "active";
+    await user.save();
 
     // Generate JWT token
     const token = user.generateToken();
@@ -136,16 +140,25 @@ router.get("/status", (req, res) => {
 });
 
 // --- Logout ---
-router.post("/logout", authMiddleware, (req, res) => {
-  const userId = req.userId;
-  const userType = req.userType;
+router.post("/logout", authMiddleware, async (req, res) => {
+  try {
+    const userId = req.userId;
+    // const userType = req.userType;
 
-  // Clear the session cookie with proper options
-  clearSessionCookie(res);
-  
-  res.json({ 
-    message: "User logged out successfully"
-  });
+    // Set user status to inactive if it's a regular user
+    if (req.userType !== 'admin') {
+      await User.findByIdAndUpdate(userId, { status: "inactive" });
+    }
+
+    // Clear the session cookie with proper options
+    clearSessionCookie(res);
+    
+    res.json({ 
+      message: "User logged out successfully"
+    });
+  } catch (err) {
+    res.status(500).json({ error: err.message });
+  }
 });
 
 // --- Forgot Password ---

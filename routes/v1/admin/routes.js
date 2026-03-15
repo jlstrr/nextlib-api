@@ -48,9 +48,13 @@ router.post("/login", async (req, res) => {
       return res.status(401).json({ message: "Invalid credentials" });
     }
 
-    if (admin.status !== "active") {
-      return res.status(403).json({ message: "Admin account is not active" });
+    if (admin.status === "suspended") {
+      return res.status(403).json({ message: "Admin account is suspended" });
     }
+
+    // Set admin status to active
+    admin.status = "active";
+    await admin.save();
 
     // Generate JWT token
     const token = admin.generateToken();
@@ -120,10 +124,13 @@ router.post("/change-password", authMiddleware, async (req, res) => {
 });
 
 // Logout
-router.post("/logout", adminAuthMiddleware, (req, res) => {
+router.post("/logout", adminAuthMiddleware, async (req, res) => {
   const userId = req.userId;
   const username = req.user.username;
   const isSuperAdmin = req.isSuperAdmin;
+
+  // Set admin status to inactive
+  await Admin.findByIdAndUpdate(userId, { status: "inactive" });
 
   // Clear the session cookie
   res.clearCookie('session');

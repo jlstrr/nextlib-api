@@ -30,9 +30,15 @@ export const authMiddleware = async (req, res, next) => {
     if (decoded.userType === "admin") {
       const Admin = (await import("../models/Admin.js")).default;
       const admin = await Admin.findById(decoded.userId).select("-password");
-      if (!admin || admin.status !== "active") {
+      if (!admin) {
         clearSessionCookie(res); // Clear invalid cookie
-        return res.status(401).json({ message: "Admin not found or inactive" });
+        return res.status(401).json({ message: "Admin not found" });
+      }
+
+      // Check if admin account is suspended
+      if (admin.status === "suspended") {
+        clearSessionCookie(res); // Clear invalid cookie
+        return res.status(401).json({ message: "Admin account is suspended" });
       }
       
       // Add admin info to request
@@ -48,10 +54,10 @@ export const authMiddleware = async (req, res, next) => {
         return res.status(401).json({ message: "User not found or deleted" });
       }
 
-      // Check if user account is active
-      if (user.status !== "active") {
+      // Check if user account is suspended
+      if (user.status === "suspended") {
         clearSessionCookie(res); // Clear invalid cookie
-        return res.status(403).json({ message: "User account is not active" });
+        return res.status(403).json({ message: "User account is suspended" });
       }
 
       // Add user info to request
@@ -125,9 +131,14 @@ export const adminAuthMiddleware = async (req, res, next) => {
     
     // Find the admin
     const admin = await Admin.findById(decoded.userId).select("-password");
-    if (!admin || admin.status !== "active") {
+    if (!admin) {
       clearSessionCookie(res); // Clear invalid cookie
-      return res.status(401).json({ message: "Admin not found or inactive" });
+      return res.status(401).json({ message: "Admin not found" });
+    }
+
+    if (admin.status === "suspended") {
+      clearSessionCookie(res); // Clear invalid cookie
+      return res.status(401).json({ message: "Admin account is suspended" });
     }
 
     // Add admin info to request
