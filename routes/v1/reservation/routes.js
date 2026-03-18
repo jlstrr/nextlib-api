@@ -1260,6 +1260,45 @@ router.post("/walk-in", adminAuthMiddleware, async (req, res) => {
   }
 });
 
+router.post("/cancel-all", adminAuthMiddleware, async (req, res) => {
+  try {
+    const { notes } = req.body || {};
+
+    const filter = {
+      isDeleted: false,
+      status: { $nin: ["completed", "cancelled"] }
+    };
+
+    const update = {
+      $set: {
+        status: "cancelled"
+      }
+    };
+
+    if (notes !== undefined) {
+      update.$set.notes = notes ? String(notes).trim() : null;
+    }
+
+    const result = await Reservation.updateMany(filter, update);
+
+    return res.status(200).json({
+      status: 200,
+      message: "All reservations cancelled successfully",
+      data: {
+        matched: result.matchedCount ?? result.n ?? 0,
+        modified: result.modifiedCount ?? result.nModified ?? 0
+      }
+    });
+  } catch (error) {
+    console.error("Cancel all reservations error:", error);
+    return res.status(500).json({
+      status: 500,
+      message: "Failed to cancel all reservations",
+      error: error.message,
+    });
+  }
+});
+
 // Update reservation status (Admin only)
 router.patch("/:id/status", adminAuthMiddleware, async (req, res) => {
   try {

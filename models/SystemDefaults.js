@@ -13,6 +13,20 @@ const systemDefaultsSchema = new mongoose.Schema(
         message: "default_allotted_time must be in format 'HH:MM:SS'"
       }
     },
+    operation_hours: {
+      type: String,
+      default: null,
+      trim: true,
+      validate: {
+        validator: function (value) {
+          if (!value) return true;
+          const normalized = String(value).trim();
+          if (/^24\s*hours$/i.test(normalized)) return true;
+          return /^([01]?\d|2[0-3]):[0-5]\d\s-\s([01]?\d|2[0-3]):[0-5]\d$/.test(normalized);
+        },
+        message: "operation_hours must be in format 'HH:MM - HH:MM' or '24 hours'"
+      }
+    },
   },
   { timestamps: true }
 );

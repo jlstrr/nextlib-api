@@ -5,6 +5,22 @@ import { adminAuthMiddleware, authMiddleware, requireSuperAdmin } from "../../..
 
 const router = Router();
 
+const normalizeOperationHours = (value) => {
+  if (value === undefined) return undefined;
+  if (!value || !String(value).trim()) return null;
+  const normalized = String(value).trim();
+  if (/^24\s*hours$/i.test(normalized)) return "24 hours";
+  return normalized;
+};
+
+const isValidOperationHours = (value) => {
+  if (value === undefined || value === null) return true;
+  const normalized = String(value).trim();
+  if (!normalized) return true;
+  if (/^24\s*hours$/i.test(normalized)) return true;
+  return /^([01]?\d|2[0-3]):[0-5]\d\s-\s([01]?\d|2[0-3]):[0-5]\d$/.test(normalized);
+};
+
 router.get("/current", authMiddleware, async (req, res) => {
   try {
     const defaults = await SystemDefaults.getCurrent();
@@ -46,22 +62,31 @@ router.get("/:id", adminAuthMiddleware, async (req, res) => {
   }
 });
 
-router.post("/", requireSuperAdmin, async (req, res) => {
+router.post("/", authMiddleware, async (req, res) => {
   try {
-    const { default_allotted_time } = req.body;
-    if (!default_allotted_time) {
-      return res.status(400).json({ status: 400, message: "default_allotted_time is required" });
+    const { default_allotted_time, operation_hours } = req.body || {};
+    if (!default_allotted_time && !operation_hours) {
+      return res.status(400).json({ status: 400, message: "default_allotted_time or operation_hours is required" });
     }
-    if (!/^\d{1,2}:[0-5]\d:[0-5]\d$/.test(default_allotted_time)) {
+    if (default_allotted_time && !/^\d{1,2}:[0-5]\d:[0-5]\d$/.test(default_allotted_time)) {
       return res.status(400).json({ status: 400, message: "default_allotted_time must be in format 'HH:MM:SS'" });
+    }
+    if (operation_hours && !isValidOperationHours(operation_hours)) {
+      return res.status(400).json({ status: 400, message: "operation_hours must be in format 'HH:MM - HH:MM' or '24 hours'" });
     }
     const existing = await SystemDefaults.findOne({});
     let defaults;
     if (existing) {
-      existing.default_allotted_time = default_allotted_time;
+      if (default_allotted_time) existing.default_allotted_time = default_allotted_time;
+      if (operation_hours !== undefined) {
+        existing.operation_hours = normalizeOperationHours(operation_hours);
+      }
       defaults = await existing.save();
     } else {
-      defaults = await SystemDefaults.create({ default_allotted_time });
+      if (!default_allotted_time) {
+        return res.status(400).json({ status: 400, message: "default_allotted_time is required when creating system defaults for the first time" });
+      }
+      defaults = await SystemDefaults.create({ default_allotted_time, operation_hours: normalizeOperationHours(operation_hours) });
     }
     res.status(201).json({ status: 201, message: "System defaults saved successfully", data: defaults });
   } catch (error) {
@@ -72,7 +97,7 @@ router.post("/", requireSuperAdmin, async (req, res) => {
 router.put("/:id", authMiddleware, async (req, res) => {
   try {
     const { id } = req.params;
-    const { default_allotted_time, updateToAllStudents } = req.body;
+    const { default_allotted_time, operation_hours, updateToAllStudents } = req.body || {};
     const defaults = await SystemDefaults.findById(id);
     if (!defaults) {
       return res.status(404).json({ status: 404, message: "System defaults not found" });
@@ -82,6 +107,12 @@ router.put("/:id", authMiddleware, async (req, res) => {
         return res.status(400).json({ status: 400, message: "default_allotted_time must be in format 'HH:MM:SS'" });
       }
       defaults.default_allotted_time = default_allotted_time;
+    }
+    if (operation_hours !== undefined) {
+      if (operation_hours && !isValidOperationHours(operation_hours)) {
+        return res.status(400).json({ status: 400, message: "operation_hours must be in format 'HH:MM - HH:MM' or '24 hours'" });
+      }
+      defaults.operation_hours = normalizeOperationHours(operation_hours);
     }
     await defaults.save();
     if (updateToAllStudents === true || updateToAllStudents === "true") {
